@@ -7,7 +7,7 @@ publish the debug image, log. No detection maths belongs in this file.
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 
 from cv_bridge import CvBridge
 from sensor_msgs.msg import CameraInfo, CompressedImage, Image
@@ -29,6 +29,7 @@ class CameraNode(Node):
         self.declare_parameter('detections_topic', '/aruco/detections')
         self.declare_parameter('marker_size', aruco_core.DEFAULT_MARKER_SIZE_M)
         self.declare_parameter('aruco_dictionary', aruco_core.DEFAULT_DICTIONARY)
+        self.declare_parameter('image_qos_depth', 5)
 
         image_topic = self.get_parameter('image_topic').value
         camera_info_topic = self.get_parameter('camera_info_topic').value
@@ -37,6 +38,7 @@ class CameraNode(Node):
         detections_topic = self.get_parameter('detections_topic').value
         self.marker_size = float(self.get_parameter('marker_size').value)
         self.dictionary_name = self.get_parameter('aruco_dictionary').value
+        image_qos_depth = self.get_parameter('image_qos_depth').value
 
         self.bridge = CvBridge()
 
@@ -49,12 +51,14 @@ class CameraNode(Node):
         self.create_subscription(
             CameraInfo, camera_info_topic, self.camera_info_callback, qos_profile_sensor_data)
 
+        # Images: same BEST_EFFORT as above, but the queue depth comes from params.yaml.
+        image_qos = QoSProfile(depth=image_qos_depth, reliability=ReliabilityPolicy.BEST_EFFORT)
         if self.use_compressed:
             self.create_subscription(
-                CompressedImage, image_topic, self.image_callback, qos_profile_sensor_data)
+                CompressedImage, image_topic, self.image_callback, image_qos)
         else:
             self.create_subscription(
-                Image, image_topic, self.image_callback, qos_profile_sensor_data)
+                Image, image_topic, self.image_callback, image_qos)
 
         # ---- Publishers --------------------------------------------------------
         self.detections_pub = self.create_publisher(MarkerDetectionArray, detections_topic, 10)
@@ -63,7 +67,8 @@ class CameraNode(Node):
         self.debug_pub = self.create_publisher(Image, debug_image_topic, 1)
 
         self.get_logger().info(
-            f'Listening: image={image_topic} (compressed={self.use_compressed}), '
+            f'Listening: image={image_topic} (compressed={self.use_compressed}, '
+            f'queue depth {image_qos_depth}), '
             f'camera_info={camera_info_topic}; marker_size={self.marker_size} m, '
             f'dictionary={self.dictionary_name}; publishing {debug_image_topic}')
 

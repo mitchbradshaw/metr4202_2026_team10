@@ -1,8 +1,9 @@
-"""Start only the ArUco camera node.
+"""Start only the ArUco camera node and the marker mapping node.
 
     ros2 launch mapping_pkg camera_only.launch.py
-    ros2 launch mapping_pkg camera_only.launch.py use_compressed:=true \
-        image_topic:=/camera/image_raw/compressed
+    ros2 launch mapping_pkg camera_only.launch.py config:=rig use_sim_time:=false
+
+Values come from team10_bringup/config/params.yaml, then <config>.yaml on top.
 """
 
 from launch import LaunchDescription
@@ -10,39 +11,35 @@ from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
     args = [
         DeclareLaunchArgument('use_sim_time', default_value='true',
                               description='Use /clock from Gazebo or `ros2 bag play --clock`'),
-        DeclareLaunchArgument('image_topic', default_value='/camera/image_raw'),
-        DeclareLaunchArgument('camera_info_topic', default_value='/camera/camera_info'),
-        DeclareLaunchArgument('use_compressed', default_value='false'),
-        DeclareLaunchArgument('marker_size', default_value='0.1',
-                              description='Black-square side length in metres (0.1 from world SDF)'),
-        DeclareLaunchArgument('aruco_dictionary', default_value='DICT_6X6_1000'),
-        DeclareLaunchArgument('map_frame', default_value='map', description='Frame to pin the \
-                              markers inside, use odom to test without SLAM'),
+        DeclareLaunchArgument('config', default_value='sim',
+                              description='sim | rig: overrides loaded on top of params.yaml'),
     ]
 
+    # Each inner list is joined into one file path. team10_bringup is found at
+    # runtime; it already depends on this package, so no package.xml entry.
+    params_files = [
+        [FindPackageShare('team10_bringup'), '/config/params.yaml'],
+        [FindPackageShare('team10_bringup'), '/config/', LaunchConfiguration('config'), '.yaml'],
+    ]
+    # ParameterValue(..., value_type=bool) makes launch pass a real bool
+    # instead of a string, which declare_parameter would otherwise reject.
+    use_sim_time = {
+        'use_sim_time': ParameterValue(LaunchConfiguration('use_sim_time'), value_type=bool),
+    }
 
     camera_node = Node(
         package='mapping_pkg',
         executable='camera_node',
         name='camera_node',
         output='screen',
-        parameters=[{
-            # ParameterValue(..., value_type=...) makes launch pass real
-            # bool/float parameters instead of strings; declare_parameter in
-            # the node would otherwise reject a string for a bool/double.
-            'use_sim_time': ParameterValue(LaunchConfiguration('use_sim_time'), value_type=bool),
-            'image_topic': LaunchConfiguration('image_topic'),
-            'camera_info_topic': LaunchConfiguration('camera_info_topic'),
-            'use_compressed': ParameterValue(LaunchConfiguration('use_compressed'), value_type=bool),
-            'marker_size': ParameterValue(LaunchConfiguration('marker_size'), value_type=float),
-            'aruco_dictionary': LaunchConfiguration('aruco_dictionary'),
-        }],
+        parameters=params_files + [use_sim_time],
     )
 
     map_markers_node = Node(
@@ -50,10 +47,7 @@ def generate_launch_description():
         executable='map_markers_node',
         name='map_markers_node',
         output='screen',
-        parameters=[{
-            'use_sim_time': ParameterValue(LaunchConfiguration('use_sim_time'), value_type=bool),
-            'map_frame': LaunchConfiguration('map_frame'),
-            }],
+        parameters=params_files + [use_sim_time],
     )
 
     return LaunchDescription(args + [camera_node, map_markers_node])

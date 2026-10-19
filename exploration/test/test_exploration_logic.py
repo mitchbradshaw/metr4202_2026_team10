@@ -19,7 +19,7 @@ or, from the package directory with the workspace sourced:
 
 from exploration.frontier_detection import find_frontiers
 from exploration.waypoint_finder import WaypointFinder, Waypoint
-from exploration.waypoint_decider import WaypointDecider
+from exploration.waypoint_decider import WaypointDecider, ranked
 
 
 # ---- helpers ------------------------------------------------------------
@@ -225,6 +225,48 @@ def test_gain_counts_unknown_and_is_zero_with_none_nearby():
     assert gain_a > 0
     assert gain_b == 0
 
+def test_gain_ignores_unknown_behind_a_wall():
+    finder = WaypointFinder(
+        max_cluster_size=100,
+        min_cluster_size=1,
+        sensor_radius_cells=8,
+    )
+
+    # Unknown space a few cells right of the waypoint (5, 2)...
+    open_map = ['......?????'] * 11
+    # ...and the same map with a solid wall in front of it.
+    walled_map = ['.....#?????'] * 11
+
+    gain_open = finder._estimate_gain(*build_grid(open_map), (5, 2), 1.0)
+    gain_walled = finder._estimate_gain(*build_grid(walled_map), (5, 2), 1.0)
+
+    assert gain_open > 0
+    assert gain_walled == 0
+
+
+def test_gain_does_not_leak_through_a_slanted_wall():
+    # SLAM draws a 45 degree wall as cells touching corner to corner. A
+    # diagonal ray could squeeze between two of them, so check it can't.
+    finder = WaypointFinder(
+        max_cluster_size=100,
+        min_cluster_size=1,
+        sensor_radius_cells=10,
+    )
+    data, width, height = build_grid([
+        '.......#',
+        '......#?',
+        '.....#??',
+        '....#???',
+        '...#????',
+        '..#?????',
+        '.#??????',
+        '#???????',
+    ])
+
+    gain = finder._estimate_gain(data, width, height, (2, 2), 1.0)
+
+    assert gain == 0
+
 
 # ---- grid -> world conversion -------------------------------------------
 
@@ -310,3 +352,34 @@ def test_decider_returns_none_when_all_blacklisted():
 
     assert best is None
     assert utility is None
+
+
+def test_score_keeps_skipped_candidates_with_no_utility():
+    bad = make_waypoint(x=5.0, y=0.0, gain=100)     # blacklisted
+    close = make_waypoint(x=0.1, y=0.0, gain=50)    # inside min_travel_dist
+    ok = make_waypoint(x=2.0, y=0.0, gain=10)
+
+    decider = WaypointDecider(
+        a=1.0, b=1.0, blacklist_radius=0.5, min_travel_dist=0.3)
+    scored = decider.score(
+        [bad, close, ok], 0.0, 0.0, blacklist=[(5.0, 0.0)])
+
+    # One entry per waypoint, same order; only ok is scored: U = 10 - 2 = 8.
+    assert [s.waypoint for s in scored] == [bad, close, ok]
+    assert scored[0].utility is None
+    assert scored[1].utility is None
+    assert abs(scored[2].utility - 8.0) < 1e-9
+    assert abs(scored[2].dist - 2.0) < 1e-9
+
+
+def test_ranked_drops_skipped_and_sorts_best_first():
+    far = make_waypoint(x=10.0, y=0.0, gain=100)    # U = 100 - 10 = 90
+    near = make_waypoint(x=1.0, y=0.0, gain=10)     # U = 10 - 1 = 9
+    mid = make_waypoint(x=4.0, y=0.0, gain=30)      # U = 30 - 4 = 26
+    bad = make_waypoint(x=6.0, y=0.0, gain=500)     # blacklisted
+
+    decider = WaypointDecider(a=1.0, b=1.0, blacklist_radius=0.5)
+    scored = decider.score(
+        [near, bad, far, mid], 0.0, 0.0, blacklist=[(6.0, 0.0)])
+
+    assert [s.waypoint for s in ranked(scored)] == [far, mid, near]

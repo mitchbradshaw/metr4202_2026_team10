@@ -17,18 +17,40 @@ The owning node passes in the latest /map data every cycle.
 """
 
 from collections import deque
+import math
 
 
 class Waypoint:
     """A single candidate goal the robot could drive to."""
 
-    def __init__(self, row, col, x, y, gain, cluster_size):
-        self.row = row                    # grid row of the waypoint cell
-        self.col = col                    # grid column of the waypoint cell
-        self.x = x                        # world x in the map frame [m]
-        self.y = y                        # world y in the map frame [m]
-        self.gain = gain                  # estimated info gain (unknown cells in disk)
-        self.cluster_size = cluster_size  # number of frontier cells that formed it
+    def __init__(self,
+                 max_cluster_size,
+                 min_cluster_size,
+                 sensor_radius_cells,
+                 unknown_value=-1,
+                 occupied_threshold=65,
+                 n_rays=120):
+        # Largest a cluster may grow before we cut it and start a new one.
+        # Roughly one sensor footprint, so each waypoint is one "bite".
+        self.max_cluster_size = max_cluster_size
+
+        # Clusters smaller than this are treated as map noise and skipped.
+        self.min_cluster_size = min_cluster_size
+
+        # How far the gain rays reach, in cells.
+        self.sensor_radius_cells = sensor_radius_cells
+
+        # Value that marks an unknown cell in the OccupancyGrid (-1 in ROS).
+        self.unknown_value = unknown_value
+
+        # Cells at or above this value are walls and stop a ray (slam_toolbox uses 100).
+        self.occupied_threshold = occupied_threshold
+
+        # Directions of the gain rays as (d_row, d_col), spread evenly round a circle.
+        self.ray_dirs = []
+        for i in range(n_rays):
+            angle = 2.0 * math.pi * i / n_rays
+            self.ray_dirs.append((math.sin(angle), math.cos(angle)))
 
 
 class WaypointFinder:
@@ -162,30 +184,50 @@ class WaypointFinder:
 
         return best_cell
 
-    # ---- step 3: info gain = unknown cells inside the sensor disk ------------
+    # ---- step 3: info gain = unknown area the lidar could see from here ------
 
     def _estimate_gain(self, data, width, height, waypoint, resolution):
+        """
+        Cast rays out from the waypoint like a lidar scan and add up the
+        unknown cells they cross before they hit a wall. Unknown space behind
+        a wall (e.g. outside the arena) can't be seen, so it no longer counts.
+
+        Rays spread apart as they go out, so a sample k cells out stands for a
+        wedge of floor 2*pi*k / n_rays cells wide. Weighting each sample by
+        that keeps the result an area in m^2, whatever n_rays is.
+        """
         w_row, w_col = waypoint
-        r = self.sensor_radius_cells
-        r_sq = r * r
-        unknown_count = 0
+        n_rays = len(self.ray_dirs)
+        gain_cells = 0.0
 
-        for d_row in range(-r, r + 1):
-            for d_col in range(-r, r + 1):
-                # Keep it a disk, not a square.
-                if d_row * d_row + d_col * d_col > r_sq:
-                    continue
-                n_row = w_row + d_row
-                n_col = w_col + d_col
-                if n_row < 0 or n_row >= height:
-                    continue
-                if n_col < 0 or n_col >= width:
-                    continue
-                idx = n_row * width + n_col
-                if data[idx] == self.unknown_value:
-                    unknown_count += 1
+        for d_row, d_col in self.ray_dirs:
+            row, col = w_row, w_col                 # last cell this ray was in
+            for k in range(1, self.sensor_radius_cells + 1):
+                # k cell lengths out from the centre of the waypoint cell
+                n_row = int(math.floor(w_row + 0.5 + k * d_row))
+                n_col = int(math.floor(w_col + 0.5 + k * d_col))
 
-        return unknown_count * resolution * resolution
+                if n_row < 0 or n_row >= height or n_col < 0 or n_col >= width:
+                    break                           # off the map
+                if self._is_wall(data, width, n_row, n_col):
+                    break                           # the lidar stops at walls
+
+                # A diagonal step slips between two cells that touch at a corner.
+                # SLAM draws slanted walls corner to corner like that, so if both
+                # of those cells are walls the ray is blocked too.
+                if (n_row != row and n_col != col
+                        and self._is_wall(data, width, row, n_col)
+                        and self._is_wall(data, width, n_row, col)):
+                    break
+
+                if data[n_row * width + n_col] == self.unknown_value:
+                    gain_cells += 2.0 * math.pi * k / n_rays
+                row, col = n_row, n_col
+
+        return gain_cells * resolution * resolution
+
+    def _is_wall(self, data, width, row, col):
+        return data[row * width + col] >= self.occupied_threshold
 
     # ---- step 4: grid -> world ----------------------------------------------
 

@@ -1,0 +1,8 @@
+# Real robot overrides, loaded after params.yaml (config:=rig).
+# Check the camera topic with `ros2 topic list | grep camera`.
+
+camera_node:
+  ros__parameters:
+    image_topic: /camera/image_raw/compressed
+    use_compressed: true
+    marker_size: 0.1          # [m] black square side, without the white border; measure the printed markers

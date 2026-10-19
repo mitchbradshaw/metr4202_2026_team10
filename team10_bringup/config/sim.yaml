@@ -1,0 +1,7 @@
+# Gazebo overrides, loaded after params.yaml (config:=sim, the default).
+
+camera_node:
+  ros__parameters:
+    image_topic: /camera/image_raw
+    use_compressed: false
+    marker_size: 0.1          # [m] black square side, from the world SDF

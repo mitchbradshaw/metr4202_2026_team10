@@ -1,0 +1,44 @@
+# Tuning values for all team 10 nodes, in one place.
+#
+# Loaded by stack.launch.py (and the per-package launch files). After this file
+# the launch loads sim.yaml or rig.yaml (config:=sim|rig), so anything that
+# differs between Gazebo and the real robot lives there instead.
+#
+# Built with `colcon build --symlink-install`, an edit here only needs a
+# relaunch, no rebuild. frontier_explorer and map_markers_node also re-read
+# their values while running, e.g.
+#     ros2 param set /frontier_explorer a 2.0
+#
+# Keep the decimal point on decimal values (2.0, not 2): ROS rejects an integer
+# for a parameter that started out as a float.
+
+frontier_explorer:
+  ros__parameters:
+    # utility = a * gain - b * distance
+    a: 1.0                    # weight on information gain [per m^2 of unknown]
+    b: 1.0                    # weight on travel distance [per m]
+    sensor_range_m: 3.5       # LDS-01 lidar range; frontier clusters are capped at half of it
+    gain_radius_m: 2.5        # [m] only count unknown cells this close to a candidate
+    min_cluster_size: 5       # [cells] frontier clusters smaller than this are noise
+    max_goal_cost: 80         # 0..100 global costmap cost; goals above it get nudged
+    nudge_radius_m: 0.5       # [m] how far a goal may be nudged to get below max_goal_cost
+    min_travel_dist: 0.5      # [m] skip candidates closer than this to the robot
+    blacklist_radius: 0.5     # [m] skip candidates this close to a failed goal
+    goal_reached_dist: 0.5    # [m] robot this close to the goal counts as reached
+    goal_timeout_s: 60.0      # [s] give up on a goal and blacklist it after this long
+    hold_s: 2.0               # [s] sit still after arriving so the camera gets frames
+
+camera_node:
+  ros__parameters:
+    camera_info_topic: /camera/camera_info
+    aruco_dictionary: DICT_6X6_1000
+    image_qos_depth: 5        # image queue length; 1 = always process the newest frame
+    # image_topic, use_compressed and marker_size are in sim.yaml / rig.yaml
+
+map_markers_node:
+  ros__parameters:
+    map_frame: map            # use odom to test without SLAM
+    max_range_m: 2.0          # [m] ignore sightings further away than this
+    outlier_min_sightings: 5  # start rejecting outliers once a marker has this many sightings
+    outlier_dist_m: 1.0       # [m] then ignore sightings this far from the current estimate
+    output_file: /tmp/aruco_markers.csv

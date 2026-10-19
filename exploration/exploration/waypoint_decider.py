@@ -12,9 +12,28 @@ Utility per candidate:
 
 The class is pure logic. The owning node supplies the robot pose (from tf2)
 and the current blacklist every cycle.
+
+score() keeps every candidate's numbers, not just the winner's, so the node
+can log them and draw them in RViz; ranked() sorts them best first.
 """
 
 import math
+
+
+class Scored:
+    """One candidate's score from this planning cycle."""
+
+    def __init__(self, waypoint, dist, utility):
+        self.waypoint = waypoint      # the Waypoint from WaypointFinder
+        self.dist = dist              # robot -> waypoint [m]
+        self.utility = utility        # None if the candidate was skipped
+
+
+def ranked(scored):
+    """The candidates that were not skipped, highest utility first."""
+    usable = [s for s in scored if s.utility is not None]
+    # sorted() is stable, so equal utilities keep their original order
+    return sorted(usable, key=lambda s: s.utility, reverse=True)
 
 
 class WaypointDecider:
@@ -23,13 +42,11 @@ class WaypointDecider:
                  a,
                  b,
                  blacklist_radius=0.5,
-                 min_travel_dist=0.5,
-                 close_penalty=1000.0):
+                 min_travel_dist=0.5):
         self.a = a                                # weight on information gain
         self.b = b                                # weight on travel cost
         self.blacklist_radius = blacklist_radius  # [m] how near a failed goal counts as "same"
         self.min_travel_dist = min_travel_dist    # [m] below this, apply the jitter penalty
-        self.close_penalty = close_penalty        # penalty added for too-close goals
 
     # ---- public entry point -------------------------------------------------
 
@@ -40,29 +57,32 @@ class WaypointDecider:
         blacklist : list of (x, y) world points that previously failed
         returns   : (best_waypoint, best_utility), or (None, None) if none are valid
         """
-        best_waypoint = None
-        best_utility = None
+        top = ranked(self.score(waypoints, robot_x, robot_y, blacklist))
+        if not top:
+            return None, None
+        return top[0].waypoint, top[0].utility
+
+    def score(self, waypoints, robot_x, robot_y, blacklist):
+        """
+        Same arguments as choose().
+        returns : list[Scored], one per waypoint in the same order
+        """
+        scored = []
 
         for wp in waypoints:
-            # Hard skip: a goal we already failed to reach.
-            if self._is_blacklisted(wp, blacklist):
-                continue
-
             cost = self._distance(robot_x, robot_y, wp.x, wp.y)
 
-            # hard skip goals that are too close
-            if cost < self.min_travel_dist:
+            # Hard skips: a goal we already failed to reach, or one too close.
+            if self._is_blacklisted(wp, blacklist) or cost < self.min_travel_dist:
+                scored.append(Scored(wp, cost, None))
                 continue
-            
+
             penalty = self._penalty(cost)
 
             utility = self.a * wp.gain - self.b * cost - penalty
+            scored.append(Scored(wp, cost, utility))
 
-            if best_utility is None or utility > best_utility:
-                best_utility = utility
-                best_waypoint = wp
-
-        return best_waypoint, best_utility
+        return scored
 
     # ---- helpers ------------------------------------------------------------
 

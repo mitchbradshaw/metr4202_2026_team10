@@ -21,13 +21,37 @@ from rclpy.node import Node
 from nav_msgs.msg import OccupancyGrid
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.msg import BehaviorTreeLog
+from visualization_msgs.msg import MarkerArray
 
 import tf2_ros
 from tf2_ros import TransformException
 
+from exploration.candidate_markers import candidate_markers
 from exploration.frontier_detection import find_frontiers
 from exploration.waypoint_finder import WaypointFinder
-from exploration.waypoint_decider import WaypointDecider
+from exploration.waypoint_decider import WaypointDecider, ranked
+
+# How many of the best candidates to print each cycle (and label in RViz).
+LOG_TOP_N = 5
+
+
+# Tuning knobs, declared as ROS parameters. The values actually used come from
+# team10_bringup/config/params.yaml (with comments there); these defaults only
+# apply if a key is missing from it, e.g. under a bare `ros2 run`.
+DEFAULTS = {
+    'a': 1.0,
+    'b': 1.0,
+    'sensor_range_m': 3.5,
+    'gain_radius_m': 1.5,
+    'min_cluster_size': 5,
+    'max_goal_cost': 80,
+    'nudge_radius_m': 0.5,
+    'min_travel_dist': 0.5,
+    'blacklist_radius': 0.5,
+    'goal_reached_dist': 0.5,
+    'goal_timeout_s': 60.0,
+    'hold_s': 2.0,
+}
 
 
 class FrontierExplorer(Node):
@@ -35,12 +59,10 @@ class FrontierExplorer(Node):
     def __init__(self):
         super().__init__('frontier_explorer')
 
-        # ---- tuning knobs ----
-        self.sensor_range_m = 3.5      # LDS-01 lidar range on the Waffle Pi
-        self.gain_radius_m = 1.5       # only count unknown cells this close to a candidate
-        self.a = 1.0                   # utility weight on information gain
-        self.b = 1.0                   # utility weight on travel cost
-        self.goal_reached_dist = 0.5   # [m] robot this close to goal counts as reached
+        # ---- tuning knobs (self.a, self.b, ...) ----
+        for name, default in DEFAULTS.items():
+            self.declare_parameter(name, default)
+        self.load_params()
 
         # ---- state (owned by the node) ----
         self.latest_map = None         # most recent OccupancyGrid
@@ -48,7 +70,6 @@ class FrontierExplorer(Node):
         self.navigating = False        # are we mid-navigation right now?
         self.blacklist = []            # (x, y) goals that failed
 
-        self.goal_timeout_s = 60.0     # max time to spend on one goal
         self.goal_sent_time = None     # time to when goal was published
         self.create_timer(1.0, self.check_timeout)
         
@@ -64,7 +85,6 @@ class FrontierExplorer(Node):
         self.latest_costmap = None
         self.costmap_sub = self.create_subscription(
             OccupancyGrid, '/global_costmap/costmap', self.costmap_callback, 10)
-        self.max_goal_cost = 80        # 0..100, anything higher is too close to a wall
 
         self.bt_log_sub = self.create_subscription(
             BehaviorTreeLog, '/behavior_tree_log', self.bt_log_callback, 10)
@@ -72,11 +92,21 @@ class FrontierExplorer(Node):
         self.goal_pub = self.create_publisher(
             PoseStamped, '/goal_pose', 10)
 
-        self.get_logger().info('Frontier explorer started.')
+        # every candidate and its score, for a MarkerArray display in RViz
+        self.candidates_pub = self.create_publisher(
+            MarkerArray, '/exploration/candidates', 10)
 
-        # when turning at goal
-        self.hold_s = 2.0              # [s] sit still after arriving so the camera gets frames
+        self.get_logger().info(
+            'Frontier explorer started. '
+            + ', '.join(f'{name}={getattr(self, name)}' for name in DEFAULTS))
+
+        # sit still after arriving (hold_s) so the camera gets frames
         self.hold_timer = None
+
+    def load_params(self):
+        """Copy the parameters onto self, so `ros2 param set` applies from the next goal."""
+        for name in DEFAULTS:
+            setattr(self, name, self.get_parameter(name).value)
 
     # ---- /map: upstaes latest map, if idle we start ecploring -----------------
 
@@ -140,6 +170,8 @@ class FrontierExplorer(Node):
         if self.latest_map is None:
             return
 
+        self.load_params()
+
         msg = self.latest_map
         info = msg.info
         data = msg.data
@@ -157,7 +189,7 @@ class FrontierExplorer(Node):
 
         finder = WaypointFinder(
             max_cluster_size=max_cluster_size,
-            min_cluster_size=5,
+            min_cluster_size=self.min_cluster_size,
             sensor_radius_cells=gain_radius_cells,
         )
 
@@ -187,27 +219,38 @@ class FrontierExplorer(Node):
             return
         robot_x, robot_y = robot
 
-        # 4: Score candidates and pick the best.
-        decider = WaypointDecider(a=self.a, b=self.b)
-        best, utility = decider.choose(
-            waypoints, robot_x, robot_y, self.blacklist)
+        # 4: Score every candidate; top is the usable ones, best first.
+        decider = WaypointDecider(
+            a=self.a,
+            b=self.b,
+            blacklist_radius=self.blacklist_radius,
+            min_travel_dist=self.min_travel_dist,
+        )
+        scored = decider.score(waypoints, robot_x, robot_y, self.blacklist)
+        top = ranked(scored)
 
-        if best is None and self.blacklist:
+        if not top and self.blacklist:
             # everything is inside a blacklist circle, so clear it and score again
             self.get_logger().warn(
                 f'All {len(waypoints)} waypoints blacklisted, clearing '
                 f'{len(self.blacklist)} entries and retrying.')
             self.blacklist = []
-            best, utility = decider.choose(
-                waypoints, robot_x, robot_y, self.blacklist)
+            scored = decider.score(waypoints, robot_x, robot_y, self.blacklist)
+            top = ranked(scored)
 
-        if best is None:
+        # 4b: show why: the best few in the log, every candidate in RViz
+        self.log_candidates(scored, top)
+        self.candidates_pub.publish(candidate_markers(
+            scored, top, frontier_cells, info, n_labels=LOG_TOP_N))
+
+        if not top:
             self.get_logger().info('No usable waypoint after clearing blacklist, nothing to do.')
             return
+        best = top[0].waypoint
 
         self.get_logger().info(
             f'Chosen goal ({best.x:.2f}, {best.y:.2f}) '
-            f'gain={best.gain:.1f} utility={utility:.1f}')
+            f'gain={best.gain:.1f} utility={top[0].utility:.1f}')
 
         # 5) Send it to Nav2.
         yaw = math.atan2(best.y - robot_y, best.x - robot_x)   # face direction of travel
@@ -217,6 +260,15 @@ class FrontierExplorer(Node):
         self.goal_sent_time = self.get_clock().now()
 
     # ---- helpers ------------------------------------------------------------
+
+    def log_candidates(self, scored, top):
+        """Print the best few candidates and their scores, to tune a and b by."""
+        lines = [f'{len(scored)} candidates ({len(scored) - len(top)} skipped), best first:']
+        for s in top[:LOG_TOP_N]:
+            lines.append(
+                f'  ({s.waypoint.x:6.2f}, {s.waypoint.y:6.2f})  '
+                f'gain={s.waypoint.gain:5.2f}  dist={s.dist:5.2f}  U={s.utility:7.2f}')
+        self.get_logger().info('\n'.join(lines))
 
     def lookup_robot_pose(self):
         try:
@@ -244,16 +296,16 @@ class FrontierExplorer(Node):
             return None
         return cm.data[row * info.width + col]
 
-    def nudge_to_low_cost(self, x, y, max_radius_m=0.5):
+    def nudge_to_low_cost(self, x, y):
         """
         Nearest (x, y) whose cost is <= max_goal_cost, searching a square
-        up to max_radius_m wide. None if the whole neighbourhood is costly.
+        up to nudge_radius_m wide. None if the whole neighbourhood is costly.
         """
         cm = self.latest_costmap
         if cm is None:
             return (x, y)                       # no costmap yet: trust the map
         res = cm.info.resolution
-        steps = int(round(max_radius_m / res))
+        steps = int(round(self.nudge_radius_m / res))
         best = None
         best_d2 = None
         for d_row in range(-steps, steps + 1):

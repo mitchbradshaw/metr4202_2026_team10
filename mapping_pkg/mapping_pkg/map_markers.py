@@ -32,18 +32,21 @@ from tf2_geometry_msgs import do_transform_point
  
 #rviz display
 from visualization_msgs.msg import Marker, MarkerArray
- 
-MAX_RANGE = 2   # metres, sightings further away than this are too noisy to use
- 
- 
+
+
 class MapMarkersNode(Node):
  
     def __init__(self):
         super().__init__('map_markers_node')
  
         # ---- ROS Parameter ----------------------------------------------
-        #needs SLAM running; to test without SLAM use map_frame:=odom
+        # values come from team10_bringup/config/params.yaml
+        #needs SLAM running; to test without SLAM set map_frame to odom there
         self.map_frame = self.declare_parameter('map_frame', 'map').value
+        # sighting filters, read each time they are used so `ros2 param set` works live
+        self.declare_parameter('max_range_m', 2.0)        # sightings further away are too noisy
+        self.declare_parameter('outlier_min_sightings', 5)
+        self.declare_parameter('outlier_dist_m', 1.0)
  
         # Initialize marker storage: marker id -> position in the map
         self.detected_markers = {}
@@ -72,7 +75,8 @@ class MapMarkersNode(Node):
  
         #Checks range of marker detection, bigger will have larger error.
         #Keeps the close markers and skips the far ones.
-        in_range = [m for m in msg.markers if m.range_m <= MAX_RANGE]
+        max_range = self.get_parameter('max_range_m').value
+        in_range = [m for m in msg.markers if m.range_m <= max_range]
         if not in_range:
             return
  
@@ -114,11 +118,11 @@ class MapMarkersNode(Node):
         """
         n = self.detection_counts.get(marker_id, 0)
 
-        # markers seen more than 5 times have worse estimates removed
-        if n >= 5:
+        # markers seen enough times have worse estimates removed
+        if n >= self.get_parameter('outlier_min_sightings').value:
              dist = float(np.linalg.norm(position[:2] - self.detected_markers[marker_id][:2]))
-             # ignore a sighting more than 1 m from the current estimate
-             if dist > 1.0:
+             # ignore a sighting too far from the current estimate
+             if dist > self.get_parameter('outlier_dist_m').value:
                   self.get_logger().warn(
                        f'marker {marker_id}: ignoring outlier {dist:.1f} m from estimate',
                        throttle_duration_sec=2.0)
