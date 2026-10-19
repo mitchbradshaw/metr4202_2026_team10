@@ -21,6 +21,7 @@ from rclpy.node import Node
 from nav_msgs.msg import OccupancyGrid
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.msg import BehaviorTreeLog
+from visualization_msgs.msg import Marker, MarkerArray
 from visualization_msgs.msg import MarkerArray
 
 import tf2_ros
@@ -28,6 +29,8 @@ from tf2_ros import TransformException
 
 from exploration.candidate_markers import candidate_markers
 from exploration.frontier_detection import find_frontiers
+from exploration.waypoint_finder import WaypointFinder, Waypoint
+from exploration.waypoint_decider import WaypointDecider
 from exploration.waypoint_finder import WaypointFinder
 from exploration.waypoint_decider import WaypointDecider, ranked
 
@@ -92,6 +95,19 @@ class FrontierExplorer(Node):
         self.goal_pub = self.create_publisher(
             PoseStamped, '/goal_pose', 10)
 
+        self.marker_sub = self.create_subscription(
+            MarkerArray, '/aruco/map_markers', self.flag_marker, 10)
+
+
+        self.seen_markers = {}
+        self.inspected_markers = set()
+        self.current_marker_id = None
+        
+        self.get_logger().info('Frontier explorer started.')
+
+        # when turning at goal
+        self.hold_s = 2.0              # [s] sit still after arriving so the camera gets frames
+
         # every candidate and its score, for a MarkerArray display in RViz
         self.candidates_pub = self.create_publisher(
             MarkerArray, '/exploration/candidates', 10)
@@ -127,6 +143,9 @@ class FrontierExplorer(Node):
         if self.hold_timer is not None:
             return                      # already holding; Nav2 can report IDLE twice
 
+        if not self.navigating:
+            return
+
         # Check if robot reached goal, and start planning next goal
         if self.current_goal is not None:
             robot = self.lookup_robot_pose()
@@ -139,6 +158,12 @@ class FrontierExplorer(Node):
                     self.get_logger().info(
                         f'Goal failed, blacklisted: {self.current_goal}')
 
+        # Marker is done, whether we reached view pose or note
+        if self.current_marker_id is not None:
+            self.get_logger().info(f"Marker {self.current_marker_id} inspected.")
+            self.inspected_markers.add(self.current_marker_id)
+            self.current_marker_id = None
+        
         # Stay "navigating" during the hold so map_callback does not plan early.
         self.goal_sent_time = None
         self.hold_timer = self.create_timer(self.hold_s, self._hold_done)
@@ -162,6 +187,9 @@ class FrontierExplorer(Node):
             self.blacklist.append(self.current_goal)
             self.navigating = False
             self.goal_sent_time = None
+            if self.current_marker_id is not None:  # We have a marker
+                self.inspected_markers.add(self.current_marker_id)
+                self.current_marker_id = None
             self.plan_and_send_goal()
 
     # ---- the core: frontiers -> finder -> decider -> goal -------------------
@@ -176,16 +204,43 @@ class FrontierExplorer(Node):
         info = msg.info
         data = msg.data
 
-        # 1: Detect frontier cells (pure logic module).
-        frontier_cells = find_frontiers(data, info.width, info.height)
-        if not frontier_cells:
-            self.get_logger().info('No frontiers left, exploration complete.')
+        # Find robot position
+        robot = self.lookup_robot_pose()
+        if robot is None:
+            self.get_logger().warn('No robot pose yet, will retry next map.')
             return
+        robot_x, robot_y = robot
 
-        # 2: Size knobs derived from map resolution + sensor range.
-        resolution = info.resolution
-        gain_radius_cells = int(round(self.gain_radius_m / resolution))
-        max_cluster_size = int(round((0.5 * self.sensor_range_m) / resolution))
+        waypoints = []
+
+        # 1: Detect frontier cells 
+        frontier_cells = find_frontiers(data, info.width, info.height)
+
+        # 2: Find waypoints from frontier cells
+        if frontier_cells:
+            resolution = info.resolution
+            gain_radius_cells = int(round(self.gain_radius_m / resolution))
+            max_cluster_size = int(round((0.5 * self.sensor_range_m) / resolution))
+
+            finder = WaypointFinder(
+                max_cluster_size=max_cluster_size,
+                min_cluster_size=5,
+                sensor_radius_cells=gain_radius_cells,
+            )
+            
+            for wp in finder.find_waypoints(data, info, frontier_cells):
+                moved = self.nudge_to_low_cost(wp.x, wp.y)
+                if moved is None:
+                    continue
+                wp.x, wp.y = moved
+                waypoints.append(wp)
+
+        # 3: Find waypoints from markers
+        for marker_id in self.seen_markers:
+            if marker_id in self.inspected_markers:
+                continue
+            mx, my = self.seen_markers[marker_id]
+            moved = self.nudge_to_low_cost(mx, my, max_radius_m=1.0, max_cost=30, robot_pos=(robot_x, robot_y))
 
         finder = WaypointFinder(
             max_cluster_size=max_cluster_size,
@@ -204,11 +259,26 @@ class FrontierExplorer(Node):
             moved = self.nudge_to_low_cost(wp.x, wp.y)
             if moved is None:
                 continue
-            wp.x, wp.y = moved
-            usable.append(wp)
-        if not usable:
-            self.get_logger().info('All waypoints inside the inflation ring this cycle.')
+            gx, gy = moved
+            
+            d_x = gx - robot_x
+            d_y = gy - robot_y
+            if math.sqrt(d_x*d_x + d_y*d_y) < 0.5:
+                self.inspected_markers.add(marker_id)     # Already there
+                continue
+                
+            waypoints.append(Waypoint(None, None, gx, gy, gain = 0.0, cluster_size = 0, marker_id = marker_id, marker_x = mx, marker_y = my))
+
+        if not waypoints:
+            self.get_logger().info("No frontier or markers left, exploration complete!")
             return
+        
+        # 4: Score candidates and pick the best.
+        decider = WaypointDecider(a=self.a, b=self.b)
+        best, utility = decider.choose(
+            waypoints, robot_x, robot_y, self.blacklist)
+
+        if best is None and self.blacklist:
         
         waypoints = usable
 
@@ -252,10 +322,15 @@ class FrontierExplorer(Node):
             f'Chosen goal ({best.x:.2f}, {best.y:.2f}) '
             f'gain={best.gain:.1f} utility={top[0].utility:.1f}')
 
-        # 5) Send it to Nav2.
-        yaw = math.atan2(best.y - robot_y, best.x - robot_x)   # face direction of travel
+        # 5: Send best waypoint to Nav2
+        if best.marker_id is not None:
+            yaw = math.atan2(best.marker_y - best.y, best.marker_x - best.x)   # face direction of marker
+        else:
+            yaw = math.atan2(best.y - robot_y, best.x - robot_x) # face direction of travel
+            
         self.publish_goal(best.x, best.y, yaw)
         self.current_goal = (best.x, best.y)
+        self.current_marker_id = best.marker_id 
         self.navigating = True
         self.goal_sent_time = self.get_clock().now()
 
@@ -296,30 +371,61 @@ class FrontierExplorer(Node):
             return None
         return cm.data[row * info.width + col]
 
+    def nudge_to_low_cost(self, wp_x, wp_y, max_radius_m=0.5, max_cost=None, robot_pos=None):
     def nudge_to_low_cost(self, x, y):
         """
+        Nearest (x, y) whose cost is <= goal_cost, searching a square
+        up to max_radius_m wide. None if the whole neighbourhood is costly.
         Nearest (x, y) whose cost is <= max_goal_cost, searching a square
         up to nudge_radius_m wide. None if the whole neighbourhood is costly.
         """
+        
+        if max_cost is None:
+            max_cost = self.max_goal_cost
+            
         cm = self.latest_costmap
         if cm is None:
-            return (x, y)                       # no costmap yet: trust the map
+            return (wp_x, wp_y)                       # no costmap yet: trust the map
+            
         res = cm.info.resolution
         steps = int(round(self.nudge_radius_m / res))
         best = None
         best_d2 = None
+        
         for d_row in range(-steps, steps + 1):
             for d_col in range(-steps, steps + 1):
-                nx = x + d_col * res
-                ny = y + d_row * res
+                nx = wp_x + d_col * res
+                ny = wp_y + d_row * res
                 c = self.costmap_cost(nx, ny)
-                if c is None or c < 0 or c > self.max_goal_cost:
+                
+                if c is None or c < 0 or c > max_cost:
                     continue
+
+                if robot_pos is not None:
+                    # k = candidate - waypoint, r = robot - waypoint
+                    k_x = nx - wp_x
+                    k_y = ny - wp_y
+                    r_x = robot_pos[0] - wp_x
+                    r_y = robot_pos[1] - wp_y
+                    
+                    if k_x * r_x + k_y * r_y <= 0: # Wrong side of the wall
+                        continue
+                    
                 d2 = d_row * d_row + d_col * d_col
                 if best_d2 is None or d2 < best_d2:
                     best_d2 = d2
                     best = (nx, ny)
         return best
+
+    def flag_marker(self, msg):
+        
+        for marker in msg.markers:
+            marker_id = marker.id
+            x = marker.pose.position.x
+            y = marker.pose.position.y
+
+            # update position with each new publication
+            self.seen_markers[marker_id] = (x,y)
 
     def publish_goal(self, x, y, yaw=0.0):
         goal = PoseStamped()
