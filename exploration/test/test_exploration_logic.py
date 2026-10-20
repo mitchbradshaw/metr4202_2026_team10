@@ -323,16 +323,29 @@ def test_decider_skips_blacklisted_goals():
 def test_decider_penalises_goals_on_top_of_the_robot():
     robot_x, robot_y = 0.0, 0.0
     # Close waypoint has more raw gain, but sits inside min_travel_dist,
-    # so the jitter penalty should knock it out in favour of the far one.
+    # so it is skipped in favour of the far one.
     close_wp = make_waypoint(x=0.1, y=0.0, gain=50)
     far_wp = make_waypoint(x=2.0, y=0.0, gain=10)
 
-    decider = WaypointDecider(
-        a=1.0, b=1.0, min_travel_dist=0.3, close_penalty=1000.0)
+    decider = WaypointDecider(a=1.0, b=1.0, min_travel_dist=0.3)
     best, utility = decider.choose(
         [close_wp, far_wp], robot_x, robot_y, blacklist=[])
 
     assert best is far_wp
+
+
+def test_decider_adds_bonus_to_marker_waypoints():
+    # A marker view pose has no gain, but the marker bonus should still let
+    # it beat a frontier with some gain: U_marker = 0 - 2 + 50 = 48 vs 10 - 2 = 8.
+    frontier = make_waypoint(x=2.0, y=0.0, gain=10)
+    marker = Waypoint(row=None, col=None, x=0.0, y=2.0, gain=0.0, cluster_size=0,
+                      marker_id=42, marker_x=0.0, marker_y=2.5)
+
+    decider = WaypointDecider(a=1.0, b=1.0, marker_bonus=50.0)
+    best, utility = decider.choose([frontier, marker], 0.0, 0.0, blacklist=[])
+
+    assert best is marker
+    assert abs(utility - 48.0) < 1e-9
 
 
 def test_decider_returns_none_when_no_candidates():

@@ -8,7 +8,7 @@ Pipeline inside find_waypoints():
         -> size-capped BFS clustering          (group connected frontier into bites)
         -> drop clusters that are too small     (noise rejection)
         -> centroid of each cluster, snapped to a real frontier cell (the waypoint)
-        -> estimate info gain around each waypoint (unknown cells in the sensor disk)
+        -> estimate info gain at each waypoint  (unknown area its rays reach before a wall)
         -> convert the waypoint cell to world (map-frame) coordinates
     -> list[Waypoint]
 
@@ -22,6 +22,21 @@ import math
 
 class Waypoint:
     """A single candidate goal the robot could drive to."""
+
+    def __init__(self, row, col, x, y, gain, cluster_size,
+                 marker_id=None, marker_x=None, marker_y=None):
+        self.row = row                    # grid row of the waypoint cell
+        self.col = col                    # grid column of the waypoint cell
+        self.x = x                        # world x in the map frame [m]
+        self.y = y                        # world y in the map frame [m]
+        self.gain = gain                  # estimated info gain (visible unknown area, m^2)
+        self.cluster_size = cluster_size  # number of frontier cells that formed it
+        self.marker_id = marker_id        # set when this is a view pose for an ArUco marker
+        self.marker_x = marker_x          # that marker's position, to face it on arrival
+        self.marker_y = marker_y
+
+
+class WaypointFinder:
 
     def __init__(self,
                  max_cluster_size,
@@ -51,27 +66,6 @@ class Waypoint:
         for i in range(n_rays):
             angle = 2.0 * math.pi * i / n_rays
             self.ray_dirs.append((math.sin(angle), math.cos(angle)))
-
-
-class WaypointFinder:
-
-    def __init__(self,
-                 max_cluster_size,
-                 min_cluster_size,
-                 sensor_radius_cells,
-                 unknown_value=-1):
-        # Largest a cluster may grow before we cut it and start a new one.
-        # Roughly one sensor footprint, so each waypoint is one "bite".
-        self.max_cluster_size = max_cluster_size
-
-        # Clusters smaller than this are treated as map noise and skipped.
-        self.min_cluster_size = min_cluster_size
-
-        # Radius of the sensor footprint, in cells, used for the gain estimate.
-        self.sensor_radius_cells = sensor_radius_cells
-
-        # Value that marks an unknown cell in the OccupancyGrid (-1 in ROS).
-        self.unknown_value = unknown_value
 
     # ---- public entry point -------------------------------------------------
 

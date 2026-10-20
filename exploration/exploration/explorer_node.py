@@ -21,7 +21,6 @@ from rclpy.node import Node
 from nav_msgs.msg import OccupancyGrid
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.msg import BehaviorTreeLog
-from visualization_msgs.msg import Marker, MarkerArray
 from visualization_msgs.msg import MarkerArray
 
 import tf2_ros
@@ -30,8 +29,6 @@ from tf2_ros import TransformException
 from exploration.candidate_markers import candidate_markers
 from exploration.frontier_detection import find_frontiers
 from exploration.waypoint_finder import WaypointFinder, Waypoint
-from exploration.waypoint_decider import WaypointDecider
-from exploration.waypoint_finder import WaypointFinder
 from exploration.waypoint_decider import WaypointDecider, ranked
 
 # How many of the best candidates to print each cycle (and label in RViz).
@@ -102,11 +99,6 @@ class FrontierExplorer(Node):
         self.seen_markers = {}
         self.inspected_markers = set()
         self.current_marker_id = None
-        
-        self.get_logger().info('Frontier explorer started.')
-
-        # when turning at goal
-        self.hold_s = 2.0              # [s] sit still after arriving so the camera gets frames
 
         # every candidate and its score, for a MarkerArray display in RViz
         self.candidates_pub = self.create_publisher(
@@ -213,10 +205,10 @@ class FrontierExplorer(Node):
 
         waypoints = []
 
-        # 1: Detect frontier cells 
+        # 1: Detect frontier cells
         frontier_cells = find_frontiers(data, info.width, info.height)
 
-        # 2: Find waypoints from frontier cells
+        # 2: Find waypoints from frontier cells, moved out of the inflation ring
         if frontier_cells:
             resolution = info.resolution
             gain_radius_cells = int(round(self.gain_radius_m / resolution))
@@ -224,10 +216,10 @@ class FrontierExplorer(Node):
 
             finder = WaypointFinder(
                 max_cluster_size=max_cluster_size,
-                min_cluster_size=5,
+                min_cluster_size=self.min_cluster_size,
                 sensor_radius_cells=gain_radius_cells,
             )
-            
+
             for wp in finder.find_waypoints(data, info, frontier_cells):
                 moved = self.nudge_to_low_cost(wp.x, wp.y)
                 if moved is None:
@@ -242,52 +234,21 @@ class FrontierExplorer(Node):
             mx, my = self.seen_markers[marker_id]
             moved = self.nudge_to_low_cost(mx, my, max_radius_m=1.0, max_cost=30, robot_pos=(robot_x, robot_y))
 
-        finder = WaypointFinder(
-            max_cluster_size=max_cluster_size,
-            min_cluster_size=self.min_cluster_size,
-            sensor_radius_cells=gain_radius_cells,
-        )
-
-        waypoints = finder.find_waypoints(data, info, frontier_cells)
-        if not waypoints:
-            self.get_logger().info('No usable waypoints this cycle.')
-            return
-
-        # 2b: move each candidate out of the inflation ring, drop it if we can't
-        usable = []
-        for wp in waypoints:
-            moved = self.nudge_to_low_cost(wp.x, wp.y)
             if moved is None:
                 continue
             gx, gy = moved
-            
+
             d_x = gx - robot_x
             d_y = gy - robot_y
             if math.sqrt(d_x*d_x + d_y*d_y) < 0.5:
                 self.inspected_markers.add(marker_id)     # Already there
                 continue
-                
+
             waypoints.append(Waypoint(None, None, gx, gy, gain = 0.0, cluster_size = 0, marker_id = marker_id, marker_x = mx, marker_y = my))
 
         if not waypoints:
             self.get_logger().info("No frontier or markers left, exploration complete!")
             return
-        
-        # 4: Score candidates and pick the best.
-        decider = WaypointDecider(a=self.a, b=self.b)
-        best, utility = decider.choose(
-            waypoints, robot_x, robot_y, self.blacklist)
-
-        if best is None and self.blacklist:
-        
-        waypoints = usable
-
-        # 3: Where is the robot right now?
-        robot = self.lookup_robot_pose()
-        if robot is None:
-            self.get_logger().warn('No robot pose yet, will retry next map.')
-            return
-        robot_x, robot_y = robot
 
         # 4: Score every candidate; top is the usable ones, best first.
         decider = WaypointDecider(
@@ -371,24 +332,25 @@ class FrontierExplorer(Node):
             return None
         return cm.data[row * info.width + col]
 
-    def nudge_to_low_cost(self, wp_x, wp_y, max_radius_m=0.5, max_cost=None, robot_pos=None):
-    def nudge_to_low_cost(self, x, y):
+    def nudge_to_low_cost(self, wp_x, wp_y, max_radius_m=None, max_cost=None, robot_pos=None):
         """
-        Nearest (x, y) whose cost is <= goal_cost, searching a square
-        up to max_radius_m wide. None if the whole neighbourhood is costly.
-        Nearest (x, y) whose cost is <= max_goal_cost, searching a square
-        up to nudge_radius_m wide. None if the whole neighbourhood is costly.
+        Nearest (x, y) whose cost is <= max_cost, searching a square up to
+        max_radius_m wide. These default to the max_goal_cost and nudge_radius_m
+        params. With robot_pos, only cells on the robot's side are used.
+        None if the whole neighbourhood is costly.
         """
-        
+
+        if max_radius_m is None:
+            max_radius_m = self.nudge_radius_m
         if max_cost is None:
             max_cost = self.max_goal_cost
-            
+
         cm = self.latest_costmap
         if cm is None:
             return (wp_x, wp_y)                       # no costmap yet: trust the map
             
         res = cm.info.resolution
-        steps = int(round(self.nudge_radius_m / res))
+        steps = int(round(max_radius_m / res))
         best = None
         best_d2 = None
         

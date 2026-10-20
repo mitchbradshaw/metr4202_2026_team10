@@ -47,7 +47,7 @@ class WaypointDecider:
         self.a = a                                # weight on information gain
         self.b = b                                # weight on travel cost
         self.blacklist_radius = blacklist_radius  # [m] how near a failed goal counts as "same"
-        self.min_travel_dist = min_travel_dist    # [m] below this, apply the jitter penalty
+        self.min_travel_dist = min_travel_dist    # [m] candidates closer than this are skipped
         self.marker_bonus = marker_bonus          # bonus for markers
 
     # ---- public entry point -------------------------------------------------
@@ -84,12 +84,9 @@ class WaypointDecider:
                 bonus = self.marker_bonus
 
             utility = self.a * wp.gain - self.b * cost + bonus
+            scored.append(Scored(wp, cost, utility))
 
-            if best_utility is None or utility > best_utility:
-                best_utility = utility
-                best_waypoint = wp
-
-        return best_waypoint, best_utility
+        return scored
 
     # ---- helpers ------------------------------------------------------------
 
