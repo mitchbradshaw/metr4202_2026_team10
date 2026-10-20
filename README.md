@@ -55,6 +55,15 @@ ros2 launch team10_bringup stack.launch.py
 ```
 `stack.launch.py` starts Nav2 with SLAM, the camera nodes and the explorer. It does not start Gazebo, so it works with any world that is already running.
 
+Alternatively, start SLAM and Nav2 in their own terminal and only our nodes on top :
+```
+ros2 launch turtlebot3_navigation2 navigation2.launch.py use_sim_time:=True slam:=True
+```
+```
+ros2 launch team10_bringup team10.launch.py use_sim_time:=true config:=sim
+```
+`team10.launch.py` starts only the camera nodes and the explorer.
+
 Our own test worlds, world and stack together:
 ```
 ros2 launch team10_bringup full_system.launch.py world:=marker_gauntlet
@@ -66,7 +75,15 @@ What you should see: the robot spawns, Nav2 and RViz start after about 10 s, and
 
 **Running on the real robot**
 
-Bring up the TurtleBot as normal and check the camera topic name with `ros2 topic list | grep camera` (it is normally compressed, and has to match `image_topic` in `team10_bringup/config/rig.yaml`). Then:
+Bring up the TurtleBot as normal and check the camera topic name with `ros2 topic list | grep camera` (it is normally compressed, and has to match `image_topic` in `team10_bringup/config/rig.yaml`).
+
+If SLAM and Nav2 are already running (started with `use_sim_time:=False`), start only our nodes:
+```
+ros2 launch team10_bringup team10.launch.py
+```
+Its defaults (`use_sim_time:=false`, `config:=rig`) are set for the real robot.
+
+To start SLAM and Nav2 together with our nodes instead:
 ```
 ros2 launch team10_bringup stack.launch.py use_sim_time:=false config:=rig
 ```
@@ -74,7 +91,7 @@ ros2 launch team10_bringup stack.launch.py use_sim_time:=false config:=rig
 
 **Tuning parameters** (`team10_bringup/config`)
 
-Every tuning value for our three nodes is in `params.yaml`: utility weights `a` and `b`, gain radius, goal timeouts, the camera queue depth, marker range and outlier limits, and so on. Each is commented there. `sim.yaml` and `rig.yaml` are loaded on top of it with the few values that differ between Gazebo and the real robot (camera topic, compressed or not, marker size), chosen with `config:=sim` (the default) or `config:=rig`. Copying `rig.yaml` to, say, `rig_slow.yaml` gives a new option `config:=rig_slow`.
+Every tuning value for our three nodes is in `params.yaml`: utility weights `a` and `b`, gain radius, goal timeouts, the camera queue depth, marker range and outlier limits, and so on. Each is commented there. `sim.yaml` and `rig.yaml` are loaded on top of it with the few values that differ between Gazebo and the real robot (camera topic, compressed or not, marker size), chosen with `config:=sim` or `config:=rig` (the default is `sim` for `stack.launch.py` and `full_system.launch.py`, and `rig` for `team10.launch.py`). Copying `rig.yaml` to, say, `rig_slow.yaml` gives a new option `config:=rig_slow`.
 
 With `colcon build --symlink-install`, edits to these files take effect on the next launch with no rebuild (the one exception is a newly added file, which needs one build to be installed). `frontier_explorer` and `map_markers_node` also pick up changes while running:
 ```
