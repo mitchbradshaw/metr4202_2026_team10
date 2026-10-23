@@ -18,6 +18,7 @@ or, from the package directory with the workspace sourced:
 """
 
 from exploration.frontier_detection import find_frontiers
+from exploration.path_distance import distance_to, path_distances
 from exploration.waypoint_finder import WaypointFinder, Waypoint
 from exploration.waypoint_decider import WaypointDecider, ranked
 
@@ -396,3 +397,109 @@ def test_ranked_drops_skipped_and_sorts_best_first():
         [near, bad, far, mid], 0.0, 0.0, blacklist=[(6.0, 0.0)])
 
     assert [s.waypoint for s in ranked(scored)] == [far, mid, near]
+
+
+# ---- driving distance ---------------------------------------------------
+
+def test_path_distance_goes_round_a_wall():
+    # The goal is 4 cells straight below the robot, but a wall is in the way
+    # and the only gap is at the far right, so the drive is much longer.
+    data, width, height = build_grid([
+        '.......',
+        '.......',
+        '######.',
+        '.......',
+        '.......',
+    ])
+    dist = path_distances(data, width, height, (0, 0))
+
+    assert distance_to(dist, width, height, (4, 0), search=0) > 2 * 4.0
+
+
+def test_path_distance_is_none_for_a_walled_off_goal():
+    data, width, height = build_grid([
+        '.....',
+        '.....',
+        '#####',
+        '.....',
+    ])
+    dist = path_distances(data, width, height, (0, 0))
+
+    assert distance_to(dist, width, height, (3, 2), search=0) is None
+    assert distance_to(dist, width, height, (1, 4), search=0) is not None
+
+
+def test_path_distance_cannot_cut_through_a_slanted_wall():
+    # SLAM draws a slanted wall as cells touching at the corners; a diagonal
+    # step must not squeeze between two of them.
+    data, width, height = build_grid([
+        '...#',
+        '..#.',
+        '.#..',
+        '#...',
+    ])
+    dist = path_distances(data, width, height, (0, 0))
+
+    assert distance_to(dist, width, height, (3, 3), search=0) is None
+
+
+def test_decider_skips_candidates_it_cannot_drive_to():
+    near = make_waypoint(x=1.0, y=0.0, gain=10)
+    walled_off = make_waypoint(x=2.0, y=0.0, gain=100)
+
+    decider = WaypointDecider(a=1.0, b=1.0)
+    best, utility = decider.choose(
+        [near, walled_off], 0.0, 0.0, blacklist=[], path_dists=[1.0, None])
+
+    assert best is near
+
+
+def test_decider_uses_driving_distance_not_straight_line():
+    # Same gain, both 2 m away in a straight line, but the first is a 10 m
+    # drive round a wall.
+    behind_wall = make_waypoint(x=2.0, y=0.0, gain=10)
+    open_side = make_waypoint(x=0.0, y=2.0, gain=10)
+
+    decider = WaypointDecider(a=1.0, b=1.0)
+    best, utility = decider.choose(
+        [behind_wall, open_side], 0.0, 0.0, blacklist=[], path_dists=[10.0, 2.0])
+
+    assert best is open_side
+
+
+# ---- local first --------------------------------------------------------
+
+def test_local_first_keeps_a_nearby_candidate_over_a_slightly_better_far_one():
+    near = make_waypoint(x=2.0, y=0.0, gain=10)     # U = 10 - 2 = 8
+    far = make_waypoint(x=4.0, y=0.0, gain=14)      # U = 14 - 4 = 10, but only 1.4x the gain
+
+    decider = WaypointDecider(a=1.0, b=1.0, local_radius=3.0, far_ratio=1.5)
+    best, utility = decider.choose([near, far], 0.0, 0.0, blacklist=[])
+
+    assert best is near
+
+
+def test_local_first_still_leaves_for_a_much_better_far_candidate():
+    near = make_waypoint(x=2.0, y=0.0, gain=10)     # U = 10 - 2 = 8
+    far = make_waypoint(x=8.0, y=0.0, gain=20)      # U = 20 - 8 = 12, and 2x the gain
+
+    decider = WaypointDecider(a=1.0, b=1.0, local_radius=3.0, far_ratio=1.5)
+    best, utility = decider.choose([near, far], 0.0, 0.0, blacklist=[])
+
+    assert best is far
+
+
+# ---- marker bonus -------------------------------------------------------
+
+def test_marker_bonus_scales_with_a():
+    # The bonus is in m^2 like gain, so at a = 8 a marker still beats a frontier
+    # with 10 m^2 of gain: 8 * (0 + 50) - 2 = 398 vs 8 * 10 - 2 = 78.
+    frontier = make_waypoint(x=2.0, y=0.0, gain=10)
+    marker = Waypoint(row=None, col=None, x=0.0, y=2.0, gain=0.0, cluster_size=0,
+                      marker_id=7, marker_x=0.0, marker_y=2.5)
+
+    decider = WaypointDecider(a=8.0, b=1.0, marker_bonus=50.0)
+    best, utility = decider.choose([frontier, marker], 0.0, 0.0, blacklist=[])
+
+    assert best is marker
+    assert abs(utility - 398.0) < 1e-9

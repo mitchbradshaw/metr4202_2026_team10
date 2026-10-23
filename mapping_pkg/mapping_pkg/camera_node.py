@@ -31,6 +31,11 @@ class CameraNode(Node):
         self.declare_parameter('aruco_dictionary', aruco_core.DEFAULT_DICTIONARY)
         self.declare_parameter('image_qos_depth', 5)
 
+        # Frame the detections are published in - empty = the image's own frame_id.
+        # Set it when the camera driver stamps images with a body frame (x forward,
+        # z up) instead of the optical frame the pose maths is in.
+        self.declare_parameter('camera_frame', '')
+
         image_topic = self.get_parameter('image_topic').value
         camera_info_topic = self.get_parameter('camera_info_topic').value
         self.use_compressed = self.get_parameter('use_compressed').value
@@ -39,6 +44,7 @@ class CameraNode(Node):
         self.marker_size = float(self.get_parameter('marker_size').value)
         self.dictionary_name = self.get_parameter('aruco_dictionary').value
         image_qos_depth = self.get_parameter('image_qos_depth').value
+        self.camera_frame = self.get_parameter('camera_frame').value
 
         self.bridge = CvBridge()
 
@@ -70,7 +76,8 @@ class CameraNode(Node):
             f'Listening: image={image_topic} (compressed={self.use_compressed}, '
             f'queue depth {image_qos_depth}), '
             f'camera_info={camera_info_topic}; marker_size={self.marker_size} m, '
-            f'dictionary={self.dictionary_name}; publishing {debug_image_topic}')
+            f'dictionary={self.dictionary_name}; publishing {debug_image_topic}; '
+            f'detections in frame {self.camera_frame or "<from image header>"}')
 
     def camera_info_callback(self, msg):
         if self.K is not None:
@@ -113,9 +120,22 @@ class CameraNode(Node):
         detections = aruco_core.detect_markers(
             image_bgr, self.K, self.dist, self.marker_size, self.dictionary_name)
 
-        # ---- detections -> published for each frame 
-        self.detections_pub.publish(self.to_detection_array(msg.header, detections))
+        # ---- which frame the detections are in
+        # tvec is always in OpenCV's optical convention (z forward, x right, y down).
+        # Gazebo stamps images with camera_rgb_optical_frame, which matches; a real
+        # camera driver may stamp a body frame, which would put the range on the
+        # vertical axis and drop every marker next to the robot. This also relabels
+        # the debug image below, which is right: an image belongs in the optical frame.
+        if self.camera_frame:
+            msg.header.frame_id = self.camera_frame
+        elif 'optical' not in msg.header.frame_id:
+            self.get_logger().warn(
+                f"Image frame '{msg.header.frame_id}' is not an optical frame, so markers "
+                f'will be misplaced; set camera_frame in the config.',
+                throttle_duration_sec=30.0)
 
+        # ---- detections -> published for each frame
+        self.detections_pub.publish(self.to_detection_array(msg.header, detections))
 
         annotated = aruco_core.draw_detections(
             image_bgr, detections, self.K, self.dist, self.marker_size)

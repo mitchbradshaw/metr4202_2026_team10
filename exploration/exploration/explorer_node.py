@@ -28,6 +28,7 @@ from tf2_ros import TransformException
 
 from exploration.candidate_markers import candidate_markers
 from exploration.frontier_detection import find_frontiers
+from exploration.path_distance import distance_to, path_distances, world_to_cell
 from exploration.waypoint_finder import WaypointFinder, Waypoint
 from exploration.waypoint_decider import WaypointDecider, ranked
 
@@ -51,6 +52,9 @@ DEFAULTS = {
     'goal_reached_dist': 0.5,
     'goal_timeout_s': 60.0,
     'hold_s': 2.0,
+    'marker_bonus': 50.0,
+    'local_radius_m': 3.0,
+    'far_ratio': 1.5,
 }
 
 
@@ -250,15 +254,21 @@ class FrontierExplorer(Node):
             self.get_logger().info("No frontier or markers left, exploration complete!")
             return
 
-        # 4: Score every candidate; top is the usable ones, best first.
+        # 3b: Driving distance to every candidate (None = the robot can't get there)
+        path_dists = self.driving_distances(waypoints, robot_x, robot_y, info, data)
+
+        # 4: Score every candidate; top is the usable ones, the chosen one first.
         decider = WaypointDecider(
             a=self.a,
             b=self.b,
             blacklist_radius=self.blacklist_radius,
             min_travel_dist=self.min_travel_dist,
+            marker_bonus=self.marker_bonus,
+            local_radius=self.local_radius_m,
+            far_ratio=self.far_ratio,
         )
-        scored = decider.score(waypoints, robot_x, robot_y, self.blacklist)
-        top = ranked(scored)
+        scored = decider.score(waypoints, robot_x, robot_y, self.blacklist, path_dists)
+        top = decider.prefer_local(ranked(scored))
 
         if not top and self.blacklist:
             # everything is inside a blacklist circle, so clear it and score again
@@ -266,8 +276,8 @@ class FrontierExplorer(Node):
                 f'All {len(waypoints)} waypoints blacklisted, clearing '
                 f'{len(self.blacklist)} entries and retrying.')
             self.blacklist = []
-            scored = decider.score(waypoints, robot_x, robot_y, self.blacklist)
-            top = ranked(scored)
+            scored = decider.score(waypoints, robot_x, robot_y, self.blacklist, path_dists)
+            top = decider.prefer_local(ranked(scored))
 
         # 4b: show why: the best few in the log, every candidate in RViz
         self.log_candidates(scored, top)
@@ -297,9 +307,29 @@ class FrontierExplorer(Node):
 
     # ---- helpers ------------------------------------------------------------
 
+    def driving_distances(self, waypoints, robot_x, robot_y, info, data):
+        """
+        Driving distance [m] from the robot to each waypoint over the free cells
+        of /map, None for one it can't reach. Returns None (so the decider falls
+        back to straight-line distances) if the robot is outside the map.
+        """
+        dist = path_distances(data, info.width, info.height,
+                              world_to_cell(robot_x, robot_y, info))
+        if dist is None:
+            self.get_logger().warn('Robot is outside /map, using straight-line distances.')
+            return None
+
+        out = []
+        for wp in waypoints:
+            d = distance_to(dist, info.width, info.height, world_to_cell(wp.x, wp.y, info))
+            out.append(None if d is None else d * info.resolution)
+        return out
+
     def log_candidates(self, scored, top):
         """Print the best few candidates and their scores, to tune a and b by."""
-        lines = [f'{len(scored)} candidates ({len(scored) - len(top)} skipped), best first:']
+        unreachable = sum(1 for s in scored if s.dist is None)
+        lines = [f'{len(scored)} candidates ({len(scored) - len(top)} skipped, '
+                 f'{unreachable} of them unreachable), chosen first:']
         for s in top[:LOG_TOP_N]:
             lines.append(
                 f'  ({s.waypoint.x:6.2f}, {s.waypoint.y:6.2f})  '

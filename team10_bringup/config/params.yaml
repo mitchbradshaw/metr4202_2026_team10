@@ -14,11 +14,11 @@
 
 frontier_explorer:
   ros__parameters:
-    # utility = a * gain - b * distance
+    # utility = a * (gain + marker bonus) - b * driving distance
     a: 1.0                    # weight on information gain [per m^2 of unknown]
     b: 1.0                    # weight on travel distance [per m]
     sensor_range_m: 3.5       # LDS-01 lidar range; frontier clusters are capped at half of it
-    gain_radius_m: 2.5        # [m] only count unknown cells this close to a candidate
+    gain_radius_m: 2.5        # [m] how far the gain rays reach; walls stop them
     min_cluster_size: 5       # [cells] frontier clusters smaller than this are noise
     max_goal_cost: 80         # 0..100 global costmap cost; goals above it get nudged
     nudge_radius_m: 0.5       # [m] how far a goal may be nudged to get below max_goal_cost
@@ -27,6 +27,9 @@ frontier_explorer:
     goal_reached_dist: 0.5    # [m] robot this close to the goal counts as reached
     goal_timeout_s: 60.0      # [s] give up on a goal and blacklist it after this long
     hold_s: 2.0               # [s] sit still after arriving so the camera gets frames
+    marker_bonus: 50.0        # [m^2] a marker view pose counts as this much gain (so it scales with a)
+    local_radius_m: 3.0       # [m] finish candidates within this driving distance first; 0 = off
+    far_ratio: 1.5            # a further candidate wins only if it offers this many times more
 
 camera_node:
   ros__parameters:
@@ -38,7 +41,7 @@ camera_node:
 map_markers_node:
   ros__parameters:
     map_frame: map            # use odom to test without SLAM
-    max_range_m: 2.0          # [m] ignore sightings further away than this
+    max_range_m: 2.3          # [m] ignore sightings further away than this
     outlier_min_sightings: 5  # start rejecting outliers once a marker has this many sightings
     outlier_dist_m: 1.0       # [m] then ignore sightings this far from the current estimate
     output_file: /tmp/aruco_markers.csv
