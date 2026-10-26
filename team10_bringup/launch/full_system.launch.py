@@ -10,6 +10,7 @@ def generate_launch_description():
     world = LaunchConfiguration('world')
     gui = LaunchConfiguration('gui')
     use_sim_time = LaunchConfiguration('use_sim_time')
+    config = LaunchConfiguration('config')
 
     world_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
@@ -24,7 +25,7 @@ def generate_launch_description():
         PythonLaunchDescriptionSource([
             FindPackageShare('team10_bringup'), '/launch/stack.launch.py'
         ]),
-        launch_arguments={'use_sim_time': use_sim_time}.items(),
+        launch_arguments={'use_sim_time': use_sim_time, 'config': config}.items(),
     )
 
     return LaunchDescription([
@@ -32,6 +33,11 @@ def generate_launch_description():
                               description='horseshoe | marker_gauntlet | slam_stress'),
         DeclareLaunchArgument('gui', default_value='true'),
         DeclareLaunchArgument('use_sim_time', default_value='True'),
+        # Declared here, not just in stack.launch.py: the explorer there sits in a
+        # TimerAction that fires after the GroupAction scope below has been popped,
+        # so a 'config' declared only inside the group no longer exists by then
+        DeclareLaunchArgument('config', default_value='sim',
+                              description='sim | rig: overrides loaded after params.yaml'),
 
         GroupAction([world_launch]),
         # Gazebo needs about 10 s to spawn the robot before Nav2 can see /odom
