@@ -12,7 +12,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from cv_bridge import CvBridge
 from sensor_msgs.msg import CameraInfo, CompressedImage, Image
 
-from mapping_interfaces.msg import MarkerDetection, MarkerDetectionArray 
+from mapping_interfaces.msg import MarkerDetection, MarkerDetectionArray
 from mapping_pkg import aruco_core
 
 
@@ -21,7 +21,7 @@ class CameraNode(Node):
     def __init__(self):
         super().__init__('camera_node')
 
-        # ---- Parameters ------------------------------------------------- 
+        # ---- Parameters -------------------------------------------------
         self.declare_parameter('image_topic', '/camera/image_raw')
         self.declare_parameter('camera_info_topic', '/camera/camera_info')
         self.declare_parameter('use_compressed', False)
@@ -31,11 +31,6 @@ class CameraNode(Node):
         self.declare_parameter('aruco_dictionary', aruco_core.DEFAULT_DICTIONARY)
         self.declare_parameter('image_qos_depth', 5)
 
-        # Frame the detections are published in - empty = the image's own frame_id.
-        # Set it when the camera driver stamps images with a body frame (x forward,
-        # z up) instead of the optical frame the pose maths is in.
-        self.declare_parameter('camera_frame', '')
-
         image_topic = self.get_parameter('image_topic').value
         camera_info_topic = self.get_parameter('camera_info_topic').value
         self.use_compressed = self.get_parameter('use_compressed').value
@@ -44,13 +39,14 @@ class CameraNode(Node):
         self.marker_size = float(self.get_parameter('marker_size').value)
         self.dictionary_name = self.get_parameter('aruco_dictionary').value
         image_qos_depth = self.get_parameter('image_qos_depth').value
-        self.camera_frame = self.get_parameter('camera_frame').value
 
         self.bridge = CvBridge()
 
         # Filled in by the first valid CameraInfo message.
         self.K = None
         self.dist = None
+        self.calib_size = None          # (width, height) the camera was calibrated at
+        self.size_checked = False       # has the first image been checked against it?
 
         # ---- Subscribers --------------------------------------------------------
         # qos_profile_sensor_data = BEST_EFFORT reliability, KEEP_LAST depth 5.
@@ -76,8 +72,7 @@ class CameraNode(Node):
             f'Listening: image={image_topic} (compressed={self.use_compressed}, '
             f'queue depth {image_qos_depth}), '
             f'camera_info={camera_info_topic}; marker_size={self.marker_size} m, '
-            f'dictionary={self.dictionary_name}; publishing {debug_image_topic}; '
-            f'detections in frame {self.camera_frame or "<from image header>"}')
+            f'dictionary={self.dictionary_name}; publishing {debug_image_topic}')
 
     def camera_info_callback(self, msg):
         if self.K is not None:
@@ -93,6 +88,7 @@ class CameraNode(Node):
 
         self.K = K
         self.dist = np.array(msg.d, dtype=np.float64)  # may be empty, aruco_core handles that
+        self.calib_size = (msg.width, msg.height)
         self.get_logger().info(
             f'Cached intrinsics from CameraInfo ({msg.width}x{msg.height}, '
             f'frame {msg.header.frame_id}): fx={K[0, 0]:.1f} fy={K[1, 1]:.1f} '
@@ -111,32 +107,23 @@ class CameraNode(Node):
                 image_bgr = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='bgr8')
             else:
                 image_bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-        except Exception as exc: 
+        except Exception as exc:
             self.get_logger().error(f'cv_bridge conversion failed: {exc}',
                                     throttle_duration_sec=2.0)
             return
+
+        # ---- intrinsics must match the image size (checked once, on the first image)
+        if not self.size_checked:
+            self.check_image_size(image_bgr.shape[1], image_bgr.shape[0])
 
         # ---- algorithm (maths in aruco_core)
         detections = aruco_core.detect_markers(
             image_bgr, self.K, self.dist, self.marker_size, self.dictionary_name)
 
-        # ---- which frame the detections are in
-        # tvec is always in OpenCV's optical convention (z forward, x right, y down).
-        # Gazebo stamps images with camera_rgb_optical_frame, which matches; a real
-        # camera driver may stamp a body frame, which would put the range on the
-        # vertical axis and drop every marker next to the robot. This also relabels
-        # the debug image below, which is right: an image belongs in the optical frame.
-        if self.camera_frame:
-            msg.header.frame_id = self.camera_frame
-        elif 'optical' not in msg.header.frame_id:
-            self.get_logger().warn(
-                f"Image frame '{msg.header.frame_id}' is not an optical frame, so markers "
-                f'will be misplaced; set camera_frame in the config.',
-                throttle_duration_sec=30.0)
-
         # ---- detections -> published for each frame
         self.detections_pub.publish(self.to_detection_array(msg.header, detections))
 
+        # ---- debug image: the camera view with each detection drawn on
         annotated = aruco_core.draw_detections(
             image_bgr, detections, self.K, self.dist, self.marker_size)
 
@@ -155,12 +142,37 @@ class CameraNode(Node):
             ]
             self.get_logger().info('Detected ' + '; '.join(parts), throttle_duration_sec=1.0)
 
+    def check_image_size(self, width, height):
+        """
+        CameraInfo's K only holds at the resolution the camera was calibrated
+        at. If the images arrive at another size (e.g. calibrated at 640x480 but
+        streamed at 320x240), every range and bearing comes out wrong by that
+        ratio, so scale K to the real image size and say so.
+        """
+        self.size_checked = True
+        calib_w, calib_h = self.calib_size
+        if calib_w == 0 or calib_h == 0 or (width, height) == (calib_w, calib_h):
+            return                      # matches, or the driver didn't give a size
+
+        s_x = width / calib_w
+        s_y = height / calib_h
+        self.K = self.K.copy()
+        self.K[0, 0] *= s_x             # fx
+        self.K[0, 2] *= s_x             # cx
+        self.K[1, 1] *= s_y             # fy
+        self.K[1, 2] *= s_y             # cy
+        self.get_logger().warn(
+            f'Images are {width}x{height} but CameraInfo was calibrated at '
+            f'{calib_w}x{calib_h}; scaled the intrinsics by x{s_x:.3f} y{s_y:.3f}. '
+            f'If those two scales differ the image is cropped, not resized: recalibrate.')
+
     @staticmethod
     def to_detection_array(header, detections):
         """list[aruco_core.Detection] -> MarkerDetectionArray.
 
         header is the source image's header: its stamp is the capture time and
-        its frame_id is the optical frame the poses are expressed in. Map node can use this for positioning
+        its frame_id is the optical frame the poses are expressed in, which is
+        what map_markers_node needs to place each marker on the map.
         """
         out = MarkerDetectionArray()
         out.header = header
@@ -174,7 +186,6 @@ class CameraNode(Node):
             m.pixel_area = d.pixel_area
             out.markers.append(m)
         return out
-
 
 
 def main(args=None):

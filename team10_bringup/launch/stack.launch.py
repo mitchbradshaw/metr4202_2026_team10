@@ -45,7 +45,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time', default_value='true',
                               description='true in Gazebo, false on the real robot'),
         DeclareLaunchArgument('config', default_value='sim',
-                              description='sim | rig: overrides loaded on top of config/params.yaml'),
+                              description='sim | rig: overrides loaded after params.yaml'),
 
         nav2_launch,
         camera_launch,

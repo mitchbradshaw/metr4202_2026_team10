@@ -26,7 +26,8 @@ class Detection:
     rvec: np.ndarray      # shape (3,), Rodrigues rotation, marker -> camera optical frame
     tvec: np.ndarray      # shape (3,), marker centre in camera optical frame, metres
     range_m: float        # Euclidean distance camera centre -> marker centre, metres
-    pixel_area: float     # area of detected target, can calculate area and compare to estimate viewing angle/range
+    pixel_area: float     # marker outline area in the image, px^2 (hints at viewing angle/range)
+
 
 # --------------------------------------------------------------------------
 # OpenCV version handling.

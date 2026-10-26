@@ -33,8 +33,9 @@ def path_distances(data, width, height, start, occupied_threshold=65):
     height    : msg.info.height
     start     : (row, col) of the robot's cell
     returns   : list with the driving distance [cells] to every cell, indexed
-                row * width + col, math.inf where the robot can't get to;
-                None if start is outside the map
+                row * width + col: math.inf for a free cell the robot can't
+                get to, None for a cell that isn't free (unknown or wall);
+                None overall if start is outside the map
     """
     s_row, s_col = start
     if s_row < 0 or s_row >= height or s_col < 0 or s_col >= width:
@@ -43,7 +44,7 @@ def path_distances(data, width, height, start, occupied_threshold=65):
     # Work out once which cells the robot can drive on: not unknown (-1), not a wall.
     free = [0 <= value < occupied_threshold for value in data]
 
-    dist = [math.inf] * (width * height)
+    dist = [math.inf if is_free else None for is_free in free]
     dist[s_row * width + s_col] = 0.0       # start here even if the robot's own cell isn't free
     heap = [(0.0, s_row, s_col)]
 
@@ -77,19 +78,31 @@ def distance_to(dist, width, height, cell, search=2):
     """
     Driving distance [cells] to cell, or None if the robot can't get there.
 
-    Looks at the nearest few cells too (a square of +-search cells), because a
-    goal nudged off a wall in the costmap can land on a cell that /map still
-    has as unknown.
+    A goal nudged off a wall in the costmap can land on a cell that /map still
+    has as unknown. If cell itself isn't free, the reachable cell nearest to it
+    (within a square of +-search cells) is used instead, plus the step from
+    there. A free cell the search never reached stays unreachable, however
+    close reachable cells are (they may be on the other side of a wall).
     """
     row, col = cell
-    best = math.inf
-    for d_row in range(-search, search + 1):
-        for d_col in range(-search, search + 1):
-            n_row = row + d_row
-            n_col = col + d_col
-            if 0 <= n_row < height and 0 <= n_col < width:
-                best = min(best, dist[n_row * width + n_col])
-    return None if best == math.inf else best
+    d = None
+    if 0 <= row < height and 0 <= col < width:
+        d = dist[row * width + col]
+
+    if d is None:
+        d = math.inf
+        best_step = None
+        for n_row in range(max(0, row - search), min(height, row + search + 1)):
+            for n_col in range(max(0, col - search), min(width, col + search + 1)):
+                n_d = dist[n_row * width + n_col]
+                if n_d is None or n_d == math.inf:
+                    continue
+                step = math.hypot(n_row - row, n_col - col)
+                if best_step is None or step < best_step:
+                    best_step = step
+                    d = n_d + step
+
+    return None if d == math.inf else d
 
 
 def world_to_cell(x, y, info):

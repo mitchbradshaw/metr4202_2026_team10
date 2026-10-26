@@ -18,7 +18,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time', default_value='true',
                               description='Use /clock from Gazebo'),
         DeclareLaunchArgument('config', default_value='sim',
-                              description='sim | rig: overrides loaded on top of params.yaml'),
+                              description='sim | rig: overrides loaded after params.yaml'),
     ]
 
     # Each inner list is joined into one file path. team10_bringup is found at

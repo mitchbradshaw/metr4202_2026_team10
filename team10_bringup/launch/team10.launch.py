@@ -1,7 +1,7 @@
 """Start the camera nodes and the explorer. No Gazebo here, so this
-runs on top of whatever world is already up, or on the real robot. 
+runs on top of whatever world is already up, or on the real robot.
 SLAM and Nav2 are expected to be running already (started separately).
-use_sim_time default set to false, launch with argument true if running a sim.
+The defaults (use_sim_time false, config rig) are for the real robot.
 
     ros2 launch team10_bringup team10.launch.py
     ros2 launch team10_bringup team10.launch.py use_sim_time:=true config:=sim
@@ -38,7 +38,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time', default_value='false',
                               description='true in Gazebo, false on the real robot'),
         DeclareLaunchArgument('config', default_value='rig',
-                              description='sim | rig: overrides loaded on top of config/params.yaml'),
+                              description='sim | rig: overrides loaded after params.yaml'),
 
         camera_launch,
         explorer_launch,

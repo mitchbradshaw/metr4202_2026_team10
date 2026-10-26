@@ -58,7 +58,7 @@ class WaypointDecider:
         self.b = b                                # weight on travel cost
         self.blacklist_radius = blacklist_radius  # [m] how near a failed goal counts as "same"
         self.min_travel_dist = min_travel_dist    # [m] candidates closer than this are skipped
-        self.marker_bonus = marker_bonus          # [m^2] a marker view pose counts as this much gain
+        self.marker_bonus = marker_bonus          # [m^2] gain a marker view pose counts as
         self.local_radius = local_radius          # [m] "local" candidates; 0 turns local-first off
         self.far_ratio = far_ratio                # a far candidate must offer this many times more
 

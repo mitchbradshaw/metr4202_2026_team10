@@ -26,24 +26,23 @@ from visualization_msgs.msg import MarkerArray
 import tf2_ros
 from tf2_ros import TransformException
 
-from exploration.candidate_markers import candidate_markers
 from exploration.frontier_detection import find_frontiers
 from exploration.path_distance import distance_to, path_distances, world_to_cell
 from exploration.waypoint_finder import WaypointFinder, Waypoint
 from exploration.waypoint_decider import WaypointDecider, ranked
 
-# How many of the best candidates to print each cycle (and label in RViz).
+# How many of the best candidates to print each cycle.
 LOG_TOP_N = 5
 
 
 # Tuning knobs, declared as ROS parameters. The values actually used come from
-# team10_bringup/config/params.yaml (with comments there); these defaults only
-# apply if a key is missing from it, e.g. under a bare `ros2 run`.
+# team10_bringup/config/params.yaml (with comments there); these defaults match
+# it and only apply if a key is missing from it, e.g. under a bare `ros2 run`.
 DEFAULTS = {
-    'a': 1.0,
+    'a': 8.0,
     'b': 1.0,
     'sensor_range_m': 3.5,
-    'gain_radius_m': 1.5,
+    'gain_radius_m': 2.5,
     'min_cluster_size': 5,
     'max_goal_cost': 80,
     'nudge_radius_m': 0.5,
@@ -53,6 +52,8 @@ DEFAULTS = {
     'goal_timeout_s': 60.0,
     'hold_s': 2.0,
     'marker_bonus': 50.0,
+    'marker_view_radius_m': 1.0,
+    'marker_view_max_cost': 30,
     'local_radius_m': 3.0,
     'far_ratio': 1.5,
 }
@@ -74,9 +75,9 @@ class FrontierExplorer(Node):
         self.navigating = False        # are we mid-navigation right now?
         self.blacklist = []            # (x, y) goals that failed
 
-        self.goal_sent_time = None     # time to when goal was published
+        self.goal_sent_time = None     # when the current goal was published
         self.create_timer(1.0, self.check_timeout)
-        
+
         # ---- tf2 for robot pose lookup (map -> base_link) ----
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -96,17 +97,13 @@ class FrontierExplorer(Node):
         self.goal_pub = self.create_publisher(
             PoseStamped, '/goal_pose', 10)
 
+        # ArUco markers placed on the map so far, so each can be visited once
         self.marker_sub = self.create_subscription(
             MarkerArray, '/aruco/map_markers', self.flag_marker, 10)
 
-
-        self.seen_markers = {}
-        self.inspected_markers = set()
-        self.current_marker_id = None
-
-        # every candidate and its score, for a MarkerArray display in RViz
-        self.candidates_pub = self.create_publisher(
-            MarkerArray, '/exploration/candidates', 10)
+        self.seen_markers = {}         # marker id -> (x, y) on the map
+        self.inspected_markers = set() # ids already visited, or given up on
+        self.current_marker_id = None  # id of the marker the current goal looks at
 
         self.get_logger().info(
             'Frontier explorer started. '
@@ -120,7 +117,7 @@ class FrontierExplorer(Node):
         for name in DEFAULTS:
             setattr(self, name, self.get_parameter(name).value)
 
-    # ---- /map: upstaes latest map, if idle we start ecploring -----------------
+    # ---- /map: keep the latest map, and plan a goal if we are idle ------------
 
     def map_callback(self, msg):
         self.latest_map = msg
@@ -154,12 +151,12 @@ class FrontierExplorer(Node):
                     self.get_logger().info(
                         f'Goal failed, blacklisted: {self.current_goal}')
 
-        # Marker is done, whether we reached view pose or note
+        # The marker counts as inspected whether or not its view pose was reached.
         if self.current_marker_id is not None:
-            self.get_logger().info(f"Marker {self.current_marker_id} inspected.")
+            self.get_logger().info(f'Marker {self.current_marker_id} inspected.')
             self.inspected_markers.add(self.current_marker_id)
             self.current_marker_id = None
-        
+
         # Stay "navigating" during the hold so map_callback does not plan early.
         self.goal_sent_time = None
         self.hold_timer = self.create_timer(self.hold_s, self._hold_done)
@@ -175,7 +172,7 @@ class FrontierExplorer(Node):
         if not self.navigating or self.goal_sent_time is None:
             return
         elapsed = (self.get_clock().now() - self.goal_sent_time).nanoseconds * 1e-9
-        
+
         # remove goals that timeout
         if elapsed > self.goal_timeout_s:
             self.get_logger().warn(
@@ -183,7 +180,7 @@ class FrontierExplorer(Node):
             self.blacklist.append(self.current_goal)
             self.navigating = False
             self.goal_sent_time = None
-            if self.current_marker_id is not None:  # We have a marker
+            if self.current_marker_id is not None:  # a marker view pose: give up on it
                 self.inspected_markers.add(self.current_marker_id)
                 self.current_marker_id = None
             self.plan_and_send_goal()
@@ -231,27 +228,32 @@ class FrontierExplorer(Node):
                 wp.x, wp.y = moved
                 waypoints.append(wp)
 
-        # 3: Find waypoints from markers
+        # 3: Find waypoints from markers: a view pose near each one not yet visited,
+        #    on the robot's side of it, in a cell well clear of walls
         for marker_id in self.seen_markers:
             if marker_id in self.inspected_markers:
                 continue
             mx, my = self.seen_markers[marker_id]
-            moved = self.nudge_to_low_cost(mx, my, max_radius_m=1.0, max_cost=30, robot_pos=(robot_x, robot_y))
+            moved = self.nudge_to_low_cost(
+                mx, my,
+                max_radius_m=self.marker_view_radius_m,
+                max_cost=self.marker_view_max_cost,
+                robot_pos=(robot_x, robot_y))
 
             if moved is None:
                 continue
             gx, gy = moved
 
-            d_x = gx - robot_x
-            d_y = gy - robot_y
-            if math.sqrt(d_x*d_x + d_y*d_y) < 0.5:
-                self.inspected_markers.add(marker_id)     # Already there
+            if math.hypot(gx - robot_x, gy - robot_y) < self.min_travel_dist:
+                self.inspected_markers.add(marker_id)     # already there
                 continue
 
-            waypoints.append(Waypoint(None, None, gx, gy, gain = 0.0, cluster_size = 0, marker_id = marker_id, marker_x = mx, marker_y = my))
+            waypoints.append(Waypoint(
+                None, None, gx, gy, gain=0.0, cluster_size=0,
+                marker_id=marker_id, marker_x=mx, marker_y=my))
 
         if not waypoints:
-            self.get_logger().info("No frontier or markers left, exploration complete!")
+            self.get_logger().info('No frontiers or markers left, exploration complete.')
             return
 
         # 3b: Driving distance to every candidate (None = the robot can't get there)
@@ -279,10 +281,8 @@ class FrontierExplorer(Node):
             scored = decider.score(waypoints, robot_x, robot_y, self.blacklist, path_dists)
             top = decider.prefer_local(ranked(scored))
 
-        # 4b: show why: the best few in the log, every candidate in RViz
+        # 4b: show why, with the best few in the log
         self.log_candidates(scored, top)
-        self.candidates_pub.publish(candidate_markers(
-            scored, top, frontier_cells, info, n_labels=LOG_TOP_N))
 
         if not top:
             self.get_logger().info('No usable waypoint after clearing blacklist, nothing to do.')
@@ -295,13 +295,13 @@ class FrontierExplorer(Node):
 
         # 5: Send best waypoint to Nav2
         if best.marker_id is not None:
-            yaw = math.atan2(best.marker_y - best.y, best.marker_x - best.x)   # face direction of marker
+            yaw = math.atan2(best.marker_y - best.y, best.marker_x - best.x)   # face the marker
         else:
-            yaw = math.atan2(best.y - robot_y, best.x - robot_x) # face direction of travel
-            
+            yaw = math.atan2(best.y - robot_y, best.x - robot_x)   # face direction of travel
+
         self.publish_goal(best.x, best.y, yaw)
         self.current_goal = (best.x, best.y)
-        self.current_marker_id = best.marker_id 
+        self.current_marker_id = best.marker_id
         self.navigating = True
         self.goal_sent_time = self.get_clock().now()
 
@@ -356,8 +356,10 @@ class FrontierExplorer(Node):
         if cm is None:
             return None
         info = cm.info
-        col = int((x - info.origin.position.x) / info.resolution)
-        row = int((y - info.origin.position.y) / info.resolution)
+        # floor, not int(): int() rounds towards zero, which would put points
+        # just outside the costmap's lower edge into its first row or column
+        col = int(math.floor((x - info.origin.position.x) / info.resolution))
+        row = int(math.floor((y - info.origin.position.y) / info.resolution))
         if row < 0 or row >= info.height or col < 0 or col >= info.width:
             return None
         return cm.data[row * info.width + col]
@@ -369,7 +371,6 @@ class FrontierExplorer(Node):
         params. With robot_pos, only cells on the robot's side are used.
         None if the whole neighbourhood is costly.
         """
-
         if max_radius_m is None:
             max_radius_m = self.nudge_radius_m
         if max_cost is None:
@@ -378,18 +379,18 @@ class FrontierExplorer(Node):
         cm = self.latest_costmap
         if cm is None:
             return (wp_x, wp_y)                       # no costmap yet: trust the map
-            
+
         res = cm.info.resolution
         steps = int(round(max_radius_m / res))
         best = None
         best_d2 = None
-        
+
         for d_row in range(-steps, steps + 1):
             for d_col in range(-steps, steps + 1):
                 nx = wp_x + d_col * res
                 ny = wp_y + d_row * res
                 c = self.costmap_cost(nx, ny)
-                
+
                 if c is None or c < 0 or c > max_cost:
                     continue
 
@@ -399,10 +400,10 @@ class FrontierExplorer(Node):
                     k_y = ny - wp_y
                     r_x = robot_pos[0] - wp_x
                     r_y = robot_pos[1] - wp_y
-                    
-                    if k_x * r_x + k_y * r_y <= 0: # Wrong side of the wall
+
+                    if k_x * r_x + k_y * r_y <= 0:    # wrong side of the wall
                         continue
-                    
+
                 d2 = d_row * d_row + d_col * d_col
                 if best_d2 is None or d2 < best_d2:
                     best_d2 = d2
@@ -410,14 +411,10 @@ class FrontierExplorer(Node):
         return best
 
     def flag_marker(self, msg):
-        
+        """Remember where each ArUco marker is on the map, from map_markers_node."""
         for marker in msg.markers:
-            marker_id = marker.id
-            x = marker.pose.position.x
-            y = marker.pose.position.y
-
             # update position with each new publication
-            self.seen_markers[marker_id] = (x,y)
+            self.seen_markers[marker.id] = (marker.pose.position.x, marker.pose.position.y)
 
     def publish_goal(self, x, y, yaw=0.0):
         goal = PoseStamped()

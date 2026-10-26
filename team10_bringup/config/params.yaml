@@ -1,8 +1,9 @@
 # Tuning values for all team 10 nodes, in one place.
 #
-# Loaded by stack.launch.py (and the per-package launch files). After this file
-# the launch loads sim.yaml or rig.yaml (config:=sim|rig), so anything that
-# differs between Gazebo and the real robot lives there instead.
+# Loaded by stack.launch.py and team10.launch.py (and the per-package launch
+# files). After this file the launch loads sim.yaml or rig.yaml
+# (config:=sim|rig), so anything that differs between Gazebo and the real
+# robot lives there instead.
 #
 # Built with `colcon build --symlink-install`, an edit here only needs a
 # relaunch, no rebuild. frontier_explorer and map_markers_node also re-read
@@ -15,7 +16,7 @@
 frontier_explorer:
   ros__parameters:
     # utility = a * (gain + marker bonus) - b * driving distance
-    a: 1.0                    # weight on information gain [per m^2 of unknown]
+    a: 8.0                    # weight on information gain [per m^2 of unknown]
     b: 1.0                    # weight on travel distance [per m]
     sensor_range_m: 3.5       # LDS-01 lidar range; frontier clusters are capped at half of it
     gain_radius_m: 2.5        # [m] how far the gain rays reach; walls stop them
@@ -27,7 +28,9 @@ frontier_explorer:
     goal_reached_dist: 0.5    # [m] robot this close to the goal counts as reached
     goal_timeout_s: 60.0      # [s] give up on a goal and blacklist it after this long
     hold_s: 2.0               # [s] sit still after arriving so the camera gets frames
-    marker_bonus: 50.0        # [m^2] a marker view pose counts as this much gain (so it scales with a)
+    marker_bonus: 50.0        # [m^2] gain a marker view pose counts as (so it scales with a)
+    marker_view_radius_m: 1.0 # [m] how far from a marker its view pose may be
+    marker_view_max_cost: 30  # 0..100 costmap cost; view poses must be this clear of walls
     local_radius_m: 3.0       # [m] finish candidates within this driving distance first; 0 = off
     far_ratio: 1.5            # a further candidate wins only if it offers this many times more
 

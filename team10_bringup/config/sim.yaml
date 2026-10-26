@@ -1,4 +1,5 @@
-# Gazebo overrides, loaded after params.yaml (config:=sim, the default).
+# Gazebo overrides, loaded after params.yaml (config:=sim, the default for
+# stack.launch.py and full_system.launch.py).
 
 camera_node:
   ros__parameters:

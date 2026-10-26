@@ -1,9 +1,8 @@
 """
 frontier_detection.py
 
-Pure frontier-detection logic with no ROS dependencies, so it can be shared by
-both the frontier_detector debug node and the frontier_explorer node. Single
-source of truth, no copy-pasted detection loop that can drift out of sync.
+Pure frontier-detection logic with no ROS dependencies, so the frontier_explorer
+node can use it and the unit tests can check it on hand-made grids.
 
 A frontier cell is a FREE cell with at least one UNKNOWN 4-neighbour: it sits on
 the boundary between mapped and unmapped space.

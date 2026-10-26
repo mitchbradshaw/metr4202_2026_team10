@@ -1,9 +1,10 @@
 """
 test_exploration_logic.py
 
-ROS-free unit tests for the three logic modules. Because none of them import
-rclpy, we can build small hand-made occupancy grids and check that the right
-values come out — no simulator, no Nav2, no tf2 required.
+ROS-free unit tests for the logic modules (frontier_detection, waypoint_finder,
+waypoint_decider, path_distance). Because none of them import rclpy, we can
+build small hand-made occupancy grids and check that the right values come
+out — no simulator, no Nav2, no tf2 required.
 
 Maps are written as lists of strings for readability:
     '.'  free      -> 0
@@ -441,6 +442,31 @@ def test_path_distance_cannot_cut_through_a_slanted_wall():
     dist = path_distances(data, width, height, (0, 0))
 
     assert distance_to(dist, width, height, (3, 3), search=0) is None
+
+
+def test_path_distance_keeps_a_cell_behind_a_thin_wall_unreachable():
+    # (2, 2) is free but walled off. Reachable cells are only 2 cells away,
+    # across the wall, and must not be borrowed for it.
+    data, width, height = build_grid([
+        '.....',
+        '#####',
+        '.....',
+    ])
+    dist = path_distances(data, width, height, (0, 0))
+
+    assert distance_to(dist, width, height, (2, 2)) is None
+
+
+def test_path_distance_uses_a_free_neighbour_for_a_goal_on_unknown():
+    # A goal nudged onto a cell /map still has as unknown takes the distance
+    # of the nearest reachable free cell, (0, 2), plus the one step from there.
+    data, width, height = build_grid([
+        '...?',
+    ])
+    dist = path_distances(data, width, height, (0, 0))
+
+    assert distance_to(dist, width, height, (0, 3)) == 3.0
+    assert distance_to(dist, width, height, (0, 3), search=0) is None
 
 
 def test_decider_skips_candidates_it_cannot_drive_to():

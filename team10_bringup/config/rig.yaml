@@ -5,5 +5,8 @@ camera_node:
   ros__parameters:
     image_topic: /camera/image_raw/compressed
     use_compressed: true
-    marker_size: 0.1          # [m] black square side, without the white border; measure the printed markers
-    camera_frame: camera_rgb_optical_frame  # images are stamped with a body frame; publish detections in this one
+    # [m] black square side, without the white border. Measure the printed markers,
+    # or check it on the robot: put a marker a tape-measured distance in front of
+    # the camera, read range in the camera_node "Detected id .." log, and set
+    #     marker_size = current marker_size * measured distance / logged range
+    marker_size: 0.1
