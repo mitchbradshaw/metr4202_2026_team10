@@ -6,3 +6,6 @@ camera_node:
     image_topic: /camera/image_raw
     use_compressed: false
     marker_size: 0.1          # [m] black square side, from the world SDF
+    # Gazebo stamps the images with the camera's body frame (x forward); marker
+    # positions are worked out in the optical frame (z forward), so use that one
+    camera_frame: camera_rgb_optical_frame

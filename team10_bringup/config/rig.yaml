@@ -10,3 +10,5 @@ camera_node:
     # the camera, read range in the camera_node "Detected id .." log, and set
     #     marker_size = current marker_size * measured distance / logged range
     marker_size: 0.1
+    # camera_frame is left unset: the robot's camera already stamps its images
+    # with camera_rgb_optical_frame
