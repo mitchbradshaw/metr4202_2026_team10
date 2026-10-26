@@ -57,8 +57,9 @@ DEFAULTS = {
     'marker_view_max_cost': 30,
     'local_radius_m': 3.0,
     'far_ratio': 1.5,
-    'spin_speed': 0.4,
-    'spin_max_cost': 90,
+    'scan_angle_deg': 30.0,
+    'scan_speed': 0.4,
+    'scan_max_cost': 90,
 }
 
 
@@ -100,7 +101,7 @@ class FrontierExplorer(Node):
         self.goal_pub = self.create_publisher(
             PoseStamped, '/goal_pose', 10)
 
-        # for the 360 degree turn at each goal (Nav2 is idle then, so nothing else drives)
+        # for the left-right scan at each goal (Nav2 is idle then, so nothing else drives)
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
         # ArUco markers placed on the map so far, so each can be visited once
@@ -115,12 +116,12 @@ class FrontierExplorer(Node):
             'Frontier explorer started. '
             + ', '.join(f'{name}={getattr(self, name)}' for name in DEFAULTS))
 
-        # after arriving: sit still (hold_s), then turn 360 degrees so the camera
-        # sees all round, then plan the next goal
+        # after arriving: sit still (hold_s), then scan left and right so the
+        # camera sees a wider view, then plan the next goal
         self.hold_timer = None
-        self.spin_timer = None
-        self.spin_end = None           # when the current turn should stop
-        self.spin_pending = False      # turn after the hold? (only at reached goals)
+        self.scan_timer = None
+        self.scan_sweeps = []          # (end time, direction) of each sweep of the scan
+        self.scan_pending = False      # scan after the hold? (only at reached goals)
 
     def load_params(self):
         """Copy the parameters onto self, so `ros2 param set` applies from the next goal."""
@@ -143,8 +144,8 @@ class FrontierExplorer(Node):
                 self.on_navigation_finished()
 
     def on_navigation_finished(self):
-        if self.hold_timer is not None or self.spin_timer is not None:
-            return                      # already holding or turning; Nav2 can report IDLE twice
+        if self.hold_timer is not None or self.scan_timer is not None:
+            return                      # already holding or scanning; Nav2 can report IDLE twice
 
         if not self.navigating:
             return
@@ -170,54 +171,65 @@ class FrontierExplorer(Node):
             self.inspected_markers.add(self.current_marker_id)
             self.current_marker_id = None
 
-        # Stay "navigating" during the hold and the turn, so map_callback does not plan early.
+        # Stay "navigating" during the hold and the scan, so map_callback does not plan early.
         self.goal_sent_time = None
-        self.spin_pending = reached
+        self.scan_pending = reached
         self.hold_timer = self.create_timer(self.hold_s, self._hold_done)
 
     def _hold_done(self):
         self.destroy_timer(self.hold_timer)
         self.hold_timer = None
 
-        # At a goal the robot actually reached, look all the way round for markers first.
-        if self.spin_pending and self.spin_speed > 0.0 and self.safe_to_spin():
-            self.start_spin()
+        # At a goal the robot actually reached, look left and right for markers first.
+        if self.scan_pending and self.scan_speed > 0.0 and self.safe_to_scan():
+            self.start_scan()
             return
 
         self.navigating = False
         self.plan_and_send_goal()
 
-    # ---- the 360 degree turn at each reached goal ----------------------------
+    # ---- the left-right scan at each reached goal ----------------------------
 
-    def safe_to_spin(self):
+    def safe_to_scan(self):
         """True if the robot is clear enough of walls to turn on the spot."""
         robot = self.lookup_robot_pose()
         cost = None if robot is None else self.costmap_cost(*robot)
-        if cost is None or cost < 0 or cost > self.spin_max_cost:
+        if cost is None or cost < 0 or cost > self.scan_max_cost:
             self.get_logger().info(
                 f'Too close to a wall to turn on the spot (costmap cost {cost}), '
-                f'skipping the turn.')
+                f'skipping the scan.')
             return False
         return True
 
-    def start_spin(self):
-        """Turn once on the spot, slowly, so the front camera sweeps the whole room."""
-        turn_s = 2.0 * math.pi / self.spin_speed
-        self.spin_end = self.get_clock().now() + Duration(seconds=turn_s)
-        self.spin_timer = self.create_timer(0.1, self._spin_step)
+    def start_scan(self):
+        """
+        Turn on the spot to +scan_angle_deg, back through the start to
+        -scan_angle_deg, then back to the start, so the front camera covers a
+        wider view. The sweeps are timed at scan_speed.
+        """
+        angle = math.radians(self.scan_angle_deg)
+        end = self.get_clock().now()
+        self.scan_sweeps = []
+        for direction, sweep in ((1.0, angle), (-1.0, 2.0 * angle), (1.0, angle)):
+            end = end + Duration(seconds=sweep / self.scan_speed)
+            self.scan_sweeps.append((end, direction))
+        self.scan_timer = self.create_timer(0.05, self._scan_step)
         self.get_logger().info(
-            f'Turning 360 deg at {self.spin_speed:.2f} rad/s ({turn_s:.0f} s).')
+            f'Scanning +-{self.scan_angle_deg:.0f} deg at {self.scan_speed:.2f} rad/s '
+            f'({4.0 * angle / self.scan_speed:.0f} s).')
 
-    def _spin_step(self):
+    def _scan_step(self):
         cmd = Twist()
-        if self.get_clock().now() < self.spin_end:
-            cmd.angular.z = self.spin_speed
-            self.cmd_vel_pub.publish(cmd)
-            return
+        now = self.get_clock().now()
+        for end, direction in self.scan_sweeps:
+            if now < end:
+                cmd.angular.z = direction * self.scan_speed
+                self.cmd_vel_pub.publish(cmd)
+                return
 
         self.cmd_vel_pub.publish(cmd)   # all zero: stop turning
-        self.destroy_timer(self.spin_timer)
-        self.spin_timer = None
+        self.destroy_timer(self.scan_timer)
+        self.scan_timer = None
         self.navigating = False
         self.plan_and_send_goal()
 

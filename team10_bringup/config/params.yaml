@@ -33,8 +33,9 @@ frontier_explorer:
     marker_view_max_cost: 30  # 0..100 costmap cost; view poses must be this clear of walls
     local_radius_m: 3.0       # [m] finish candidates within this driving distance first; 0 = off
     far_ratio: 1.5            # a further candidate wins only if it offers this many times more
-    spin_speed: 0.4           # [rad/s] slow 360 deg turn at each reached goal, for the camera; 0 = off
-    spin_max_cost: 90         # 0..100 costmap cost under the robot; above it the turn is skipped
+    scan_angle_deg: 30.0      # [deg] at each reached goal, look this far left and right
+    scan_speed: 0.4           # [rad/s] turn speed while scanning; 0 = no scan
+    scan_max_cost: 90         # 0..100 costmap cost under the robot; above it the scan is skipped
 
 camera_node:
   ros__parameters:
